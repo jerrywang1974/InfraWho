@@ -518,6 +518,25 @@ func (f *failAuditor) Write(in audit.WriteInput) error {
 	return nil
 }
 
+// flakyAuditor fails the first failTimes writes for failOn, then delegates.
+type flakyAuditor struct {
+	failOn    string
+	failTimes int
+	failed    int
+	inner     accounts.Auditor
+}
+
+func (f *flakyAuditor) Write(in audit.WriteInput) error {
+	if in.Action == f.failOn && f.failed < f.failTimes {
+		f.failed++
+		return errors.New("transient audit failure")
+	}
+	if f.inner != nil {
+		return f.inner.Write(in)
+	}
+	return nil
+}
+
 func TestRevealFailsClosedWhenAuditWriteFails(t *testing.T) {
 	sqlDB, err := db.Open("sqlite::memory:")
 	if err != nil {
@@ -565,5 +584,79 @@ func TestRevealFailsClosedWhenAuditWriteFails(t *testing.T) {
 	_ = json.NewDecoder(strings.NewReader(rec.Body.String())).Decode(&body)
 	if _, ok := body["secret"]; ok {
 		t.Fatalf("secret must not be present on audit failure: %#v", body)
+	}
+}
+
+func TestRevealRateLimitAuditRetriesUntilSuccess(t *testing.T) {
+	sqlDB, err := db.Open("sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	kekPath := writeTempKEK(t)
+	limiter := ratelimit.New()
+	authStore := auth.NewStore(sqlDB)
+	ah := auth.NewHandler(authStore, limiter, auth.Options{
+		CookieSecure:   false,
+		MasterKeyReady: func() bool { return true },
+	})
+	auditStore := audit.NewStore(sqlDB)
+	assetH := assets.NewHandler(assets.NewStore(sqlDB), assets.Options{})
+	accountStore := accounts.NewStore(sqlDB, accounts.StoreOptions{
+		KeyVersion: "kek-v1",
+		LoadKEK:    func() ([]byte, error) { return config.LoadMasterKey(kekPath) },
+	})
+	flaky := &flakyAuditor{failOn: audit.ActionRevealRateLimited, failTimes: 1, inner: auditStore}
+	accountH := accounts.NewHandler(accountStore, flaky, accounts.Options{Limiter: limiter})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/auth/login", ah.Login)
+	mux.HandleFunc("/api/v1/auth/step-up", ah.StepUp)
+	mux.HandleFunc("/api/v1/setup/bootstrap", ah.Bootstrap)
+	assetH.Register(mux, ah.RequireOrigin)
+	accountH.Register(mux, ah.RequireOrigin)
+	srv := ah.Middleware(mux)
+
+	tok := bootstrap(t, srv)
+	assetID := createAsset(t, srv, tok, "rate-retry.example")
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets/"+assetID+"/accounts", tok,
+		`{"username":"u","auth_type":"password","secret":"p"}`)
+	var acc map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&acc)
+	id, _ := acc["id"].(string)
+	stepUp(t, srv, tok)
+
+	for i := 0; i < auth.RevealSessionLimit; i++ {
+		rec = doJSON(t, srv, http.MethodPost, "/api/v1/accounts/"+id+"/reveal", tok, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("reveal %d: %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/accounts/"+id+"/reveal", tok, "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("first rate-limit audit fail: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/accounts/"+id+"/reveal", tok, "")
+	if rec.Code != http.StatusTooManyRequests || errorCode(rec.Body) != "rate_limited" {
+		t.Fatalf("retry after audit recovery: %d %s", rec.Code, rec.Body.String())
+	}
+
+	events, _, err := auditStore.List(audit.ListFilter{Action: audit.ActionRevealRateLimited, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want one REVEAL_RATE_LIMITED after retry, got %d", len(events))
+	}
+
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/accounts/"+id+"/reveal", tok, "")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("subsequent deny: %d", rec.Code)
+	}
+	events, _, err = auditStore.List(audit.ListFilter{Action: audit.ActionRevealRateLimited, Limit: 10})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("dedup after confirm: len=%d err=%v", len(events), err)
 	}
 }

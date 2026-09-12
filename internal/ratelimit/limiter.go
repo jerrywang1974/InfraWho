@@ -14,7 +14,7 @@ type Limiter struct {
 type window struct {
 	count  int
 	start  time.Time
-	denied bool // first-deny already signaled this window
+	denied bool // ConfirmDeny has recorded a successful deny audit this window
 }
 
 func New() *Limiter {
@@ -27,8 +27,9 @@ func (l *Limiter) Allow(key string, max int, per time.Duration) bool {
 	return ok
 }
 
-// AllowReport is like Allow; firstDeny is true only on the first rejection in the current window.
-func (l *Limiter) AllowReport(key string, max int, per time.Duration) (allowed, firstDeny bool) {
+// AllowReport is like Allow. needDenyAudit is true while ConfirmDeny has not yet
+// succeeded for this window (callers should audit then ConfirmDeny).
+func (l *Limiter) AllowReport(key string, max int, per time.Duration) (allowed, needDenyAudit bool) {
 	if max <= 0 || per <= 0 {
 		return true, false
 	}
@@ -42,12 +43,19 @@ func (l *Limiter) AllowReport(key string, max int, per time.Duration) (allowed, 
 		return true, false
 	}
 	if w.count >= max {
-		first := !w.denied
-		w.denied = true
-		return false, first
+		return false, !w.denied
 	}
 	w.count++
 	return true, false
+}
+
+// ConfirmDeny latches deny-audit completion for key's current window.
+func (l *Limiter) ConfirmDeny(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if w, ok := l.windows[key]; ok {
+		w.denied = true
+	}
 }
 
 // Lockout tracks consecutive failures and temporary locks per key.

@@ -252,9 +252,10 @@ func (h *Handler) Reveal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allowed, firstDeny := h.limiter.AllowReport("reveal:session:"+sess.ID, auth.RevealSessionLimit, auth.RevealWindow)
+	limitKey := "reveal:session:" + sess.ID
+	allowed, needDenyAudit := h.limiter.AllowReport(limitKey, auth.RevealSessionLimit, auth.RevealWindow)
 	if !allowed {
-		if firstDeny {
+		if needDenyAudit {
 			in := h.auditBase(r)
 			in.Action = audit.ActionRevealRateLimited
 			in.ResourceType = "account"
@@ -266,6 +267,7 @@ func (h *Handler) Reveal(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "internal_error", "Could not record audit event")
 				return
 			}
+			h.limiter.ConfirmDeny(limitKey)
 		}
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Reveal rate limit exceeded")
 		return

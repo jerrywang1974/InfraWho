@@ -23,18 +23,24 @@ func TestLimiterAllow(t *testing.T) {
 func TestAllowReportFirstDeny(t *testing.T) {
 	l := New()
 	for i := 0; i < 2; i++ {
-		ok, first := l.AllowReport("k", 2, time.Minute)
-		if !ok || first {
-			t.Fatalf("allow #%d: ok=%v first=%v", i+1, ok, first)
+		ok, need := l.AllowReport("k", 2, time.Minute)
+		if !ok || need {
+			t.Fatalf("allow #%d: ok=%v need=%v", i+1, ok, need)
 		}
 	}
-	ok, first := l.AllowReport("k", 2, time.Minute)
-	if ok || !first {
-		t.Fatalf("first deny: ok=%v first=%v", ok, first)
+	ok, need := l.AllowReport("k", 2, time.Minute)
+	if ok || !need {
+		t.Fatalf("first deny: ok=%v need=%v", ok, need)
 	}
-	ok, first = l.AllowReport("k", 2, time.Minute)
-	if ok || first {
-		t.Fatalf("second deny: ok=%v first=%v", ok, first)
+	// Without ConfirmDeny, subsequent denials still need audit.
+	ok, need = l.AllowReport("k", 2, time.Minute)
+	if ok || !need {
+		t.Fatalf("unconfirmed deny: ok=%v need=%v", ok, need)
+	}
+	l.ConfirmDeny("k")
+	ok, need = l.AllowReport("k", 2, time.Minute)
+	if ok || need {
+		t.Fatalf("after confirm: ok=%v need=%v", ok, need)
 	}
 }
 
