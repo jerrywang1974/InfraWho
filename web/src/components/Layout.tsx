@@ -1,8 +1,24 @@
+import { useState } from 'react'
 import { Link, Outlet } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
+import { formatRole } from '../lib/format'
 
 export function Layout() {
   const { user, setup, logout } = useAuth()
+  const [logoutError, setLogoutError] = useState<string | null>(null)
+  const [loggingOut, setLoggingOut] = useState(false)
+
+  async function onLogout() {
+    setLogoutError(null)
+    setLoggingOut(true)
+    try {
+      await logout()
+    } catch {
+      setLogoutError('登出失敗，工作階段可能仍有效。請重試。')
+    } finally {
+      setLoggingOut(false)
+    }
+  }
 
   return (
     <div className="app-shell">
@@ -18,15 +34,26 @@ export function Layout() {
             <>
               <span className="muted">
                 {user.display_name || user.username}
-                <span className="role-pill">{user.role}</span>
+                <span className="role-pill">{formatRole(user.role)}</span>
               </span>
-              <button type="button" className="btn btn-ghost" onClick={() => void logout()}>
-                登出
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={loggingOut}
+                onClick={() => void onLogout()}
+              >
+                {loggingOut ? '登出中…' : '登出'}
               </button>
             </>
           ) : null}
         </div>
       </header>
+
+      {logoutError ? (
+        <div className="banner warn" role="alert">
+          {logoutError}
+        </div>
+      ) : null}
 
       {setup?.show_banner ? (
         <div className="banner warn" role="status">

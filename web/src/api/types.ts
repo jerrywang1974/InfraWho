@@ -50,12 +50,6 @@ export type AssetListResponse = {
   total: number
 }
 
-export type AssetDetail = Asset & {
-  accounts: unknown[]
-  jobs: unknown[]
-  notes: unknown[]
-}
-
 export type CreateAssetInput = {
   name: string
   hostname: string
@@ -63,7 +57,7 @@ export type CreateAssetInput = {
   os_family: string
   os_detail?: string
   environment: string
-  purpose?: string
+  purpose: string
   primary_ip?: string
   owner_id?: string | null
   status?: string

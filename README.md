@@ -117,17 +117,16 @@ Compose bind-mounts `./lab-master.key` to `/etc/infrawho/master.key` and stores 
 React + Vite SPA in [`web/`](web/). UI strings are Traditional Chinese.
 
 ```bash
-# API (cookie Secure off + trust Vite origin for CSRF Origin checks)
+# API (cookie Secure off for plain HTTP lab)
 export INFRAWHO_COOKIE_SECURE=false
-export INFRAWHO_TRUSTED_ORIGINS='http://localhost:5173'
 # …plus DB URL / master key / listen addr as above…
 go run ./cmd/infrawho
 
-# SPA (proxies /api to :8080)
+# SPA (proxies /api to :8080; Host stays localhost:5173 so Origin checks match)
 cd web && npm install && npm run dev
 ```
 
-See [`web/README.md`](web/README.md). Production embedding of `web/dist` from Go is deferred; lab uses the Vite proxy.
+`INFRAWHO_TRUSTED_ORIGINS` is optional for the default Vite lab proxy (`changeOrigin: false`). See [`web/README.md`](web/README.md). Production embedding of `web/dist` from Go is deferred.
 
 ## Auth & first-run setup
 

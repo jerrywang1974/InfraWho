@@ -14,7 +14,7 @@
   --ok: #7fd99a;
   --bad: #f07178;
   --radius: 10px;
-  font-family: 'Noto Sans TC', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-family: 'Segoe UI', 'PingFang TC', 'Microsoft JhengHei', system-ui, sans-serif;
   line-height: 1.5;
   font-weight: 400;
   color: var(--text);
@@ -393,5 +393,10 @@ textarea {
   border-radius: 999px;
   background: var(--panel-2);
   border: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.hint {
+  margin: 0.75rem 0 0;
   font-size: 0.85rem;
 }

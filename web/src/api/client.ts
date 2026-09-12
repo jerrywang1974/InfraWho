@@ -1,7 +1,6 @@
 import type {
   ApiErrorBody,
   Asset,
-  AssetDetail,
   AssetListResponse,
   CreateAssetInput,
   SetupStatus,
@@ -42,13 +41,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers,
     credentials: 'include',
   })
-  if (res.status === 204) {
-    return undefined as T
-  }
   if (!res.ok) {
     throw await parseError(res)
   }
-  if (res.status === 204 || res.headers.get('content-length') === '0') {
+  if (res.status === 204) {
     return undefined as T
   }
   const text = await res.text()
@@ -117,8 +113,31 @@ export function listAssets(params?: {
   return request(`/api/v1/assets${qs ? `?${qs}` : ''}`)
 }
 
-export function getAsset(id: string): Promise<AssetDetail> {
-  return request(`/api/v1/assets/${encodeURIComponent(id)}`)
+/** Asset master data only — nested accounts/jobs/notes summaries are dropped until PR 10. */
+export async function getAsset(id: string): Promise<Asset> {
+  const raw = await request<Asset>(`/api/v1/assets/${encodeURIComponent(id)}`)
+  return {
+    id: raw.id,
+    name: raw.name,
+    hostname: raw.hostname,
+    asset_type: raw.asset_type,
+    os_family: raw.os_family,
+    os_detail: raw.os_detail,
+    environment: raw.environment,
+    purpose: raw.purpose,
+    primary_ip: raw.primary_ip,
+    additional_ips: raw.additional_ips ?? [],
+    location: raw.location,
+    hypervisor: raw.hypervisor,
+    owner_id: raw.owner_id,
+    backup_owner_id: raw.backup_owner_id,
+    status: raw.status,
+    config_notes: raw.config_notes,
+    tags: raw.tags ?? [],
+    deleted_at: raw.deleted_at,
+    created_at: raw.created_at,
+    updated_at: raw.updated_at,
+  }
 }
 
 export function createAsset(body: CreateAssetInput): Promise<Asset> {

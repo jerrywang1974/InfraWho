@@ -4,7 +4,12 @@ import * as api from '../api/client'
 import { ApiError } from '../api/client'
 import type { Asset } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { formatOwner, formatOS } from '../lib/format'
+import {
+  formatEnvironment,
+  formatOS,
+  formatOwner,
+  formatStatus,
+} from '../lib/format'
 
 const PAGE_SIZE = 50
 
@@ -99,7 +104,7 @@ export function AssetListPage() {
             <thead>
               <tr>
                 <th>名稱</th>
-                <th>Hostname</th>
+                <th>主機名稱</th>
                 <th>用途</th>
                 <th>負責人</th>
                 <th>作業系統</th>
@@ -117,10 +122,10 @@ export function AssetListPage() {
                     <code>{a.hostname}</code>
                   </td>
                   <td className="clamp">{a.purpose || '—'}</td>
-                  <td>{formatOwner(a.owner_id, user)}</td>
+                  <td title={a.owner_id ?? undefined}>{formatOwner(a.owner_id, user)}</td>
                   <td>{formatOS(a.os_family, a.os_detail)}</td>
-                  <td>{a.environment}</td>
-                  <td>{a.status}</td>
+                  <td>{formatEnvironment(a.environment)}</td>
+                  <td>{formatStatus(a.status)}</td>
                 </tr>
               ))}
             </tbody>
@@ -176,12 +181,17 @@ function CreateAssetForm({
   async function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
+    const purposeText = purpose.trim()
+    if (!purposeText) {
+      setError('用途為必填')
+      return
+    }
     setSubmitting(true)
     try {
       await api.createAsset({
         name: name.trim(),
         hostname: hostname.trim(),
-        purpose: purpose.trim() || undefined,
+        purpose: purposeText,
         os_family: osFamily,
         os_detail: osDetail.trim() || undefined,
         environment,
@@ -210,12 +220,17 @@ function CreateAssetForm({
           <input value={name} onChange={(e) => setName(e.target.value)} required />
         </label>
         <label>
-          Hostname
+          主機名稱
           <input value={hostname} onChange={(e) => setHostname(e.target.value)} required />
         </label>
         <label className="span-2">
           用途
-          <textarea value={purpose} onChange={(e) => setPurpose(e.target.value)} rows={2} />
+          <textarea
+            value={purpose}
+            onChange={(e) => setPurpose(e.target.value)}
+            rows={2}
+            required
+          />
         </label>
         <label>
           類型
@@ -228,11 +243,11 @@ function CreateAssetForm({
         <label>
           環境
           <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
-            <option value="prod">prod</option>
-            <option value="staging">staging</option>
-            <option value="dev">dev</option>
-            <option value="lab">lab</option>
-            <option value="other">other</option>
+            <option value="prod">正式 (prod)</option>
+            <option value="staging">預備 (staging)</option>
+            <option value="dev">開發 (dev)</option>
+            <option value="lab">實驗 (lab)</option>
+            <option value="other">其他</option>
           </select>
         </label>
         <label>

@@ -5,7 +5,7 @@ import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 
 export function SetupPage() {
-  const { user, setup, loading, setUser, refresh } = useAuth()
+  const { user, setup, loading, setUser, setSetup, refresh } = useAuth()
   const [username, setUsername] = useState('admin')
   const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
@@ -55,7 +55,19 @@ export function SetupPage() {
         acknowledge_backup_planned: ackBackup,
       })
       setUser(u)
-      await refresh()
+      // Bootstrap persists checklist; optimistically clear wizard so a failed
+      // status poll cannot strand the UI on the setup form.
+      setSetup({
+        needs_bootstrap: false,
+        master_key_ready: true,
+        checklist_complete: true,
+        show_banner: false,
+      })
+      try {
+        setSetup(await api.getSetupStatus())
+      } catch {
+        // Keep optimistic setup; session cookie is already set.
+      }
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.code === 'not_ready') {

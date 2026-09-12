@@ -18,6 +18,7 @@ type AuthState = {
   refresh: () => Promise<void>
   setUser: (user: User | null) => void
   setSetup: (setup: SetupStatus | null) => void
+  /** Resolves only after the server clears the session cookie. */
   logout: () => Promise<void>
 }
 
@@ -31,8 +32,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const status = await api.getSetupStatus()
-      setSetup(status)
+      let status: SetupStatus
+      try {
+        status = await api.getSetupStatus()
+        setSetup(status)
+      } catch {
+        // Keep prior setup/user on transient failures (do not wipe a valid session).
+        return
+      }
       if (status.needs_bootstrap) {
         setUser(null)
         return
@@ -41,15 +48,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const u = await api.me()
         setUser(u)
       } catch (err) {
+        // Only treat 401 as signed-out; keep user on 5xx/network blips.
         if (err instanceof ApiError && err.status === 401) {
-          setUser(null)
-        } else {
           setUser(null)
         }
       }
-    } catch {
-      setSetup(null)
-      setUser(null)
     } finally {
       setLoading(false)
     }
@@ -60,11 +63,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refresh])
 
   const logout = useCallback(async () => {
-    try {
-      await api.logout()
-    } finally {
-      setUser(null)
-    }
+    await api.logout()
+    setUser(null)
   }, [])
 
   const value = useMemo(

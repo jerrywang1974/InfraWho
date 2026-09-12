@@ -5,7 +5,7 @@ import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 
 export function LoginPage() {
-  const { user, setup, loading, setUser, refresh } = useAuth()
+  const { user, setup, loading, setUser, setSetup } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -25,7 +25,12 @@ export function LoginPage() {
     try {
       const u = await api.login(username.trim(), password)
       setUser(u)
-      await refresh()
+      // Refresh setup banner flags without risking a wipe of the new session.
+      try {
+        setSetup(await api.getSetupStatus())
+      } catch {
+        // Session cookie is set; setup flags can wait for a later refresh.
+      }
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.code === 'lockout' || err.status === 429) {
@@ -33,7 +38,7 @@ export function LoginPage() {
         } else if (err.status === 401) {
           setError('使用者名稱或密碼不正確。')
         } else if (err.code === 'forbidden') {
-          setError('來源驗證失敗。請確認 API 已設定 INFRAWHO_TRUSTED_ORIGINS（開發時為 Vite 來源）。')
+          setError('來源驗證失敗。若使用自訂 Origin，請設定 INFRAWHO_TRUSTED_ORIGINS。')
         } else {
           setError(err.message || '登入失敗')
         }

@@ -2,15 +2,21 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import * as api from '../api/client'
 import { ApiError } from '../api/client'
-import type { AssetDetail } from '../api/types'
+import type { Asset } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { PlaceholderPanel } from '../components/PlaceholderPanel'
-import { formatOwner, formatOS } from '../lib/format'
+import {
+  formatAssetType,
+  formatEnvironment,
+  formatOS,
+  formatOwner,
+  formatStatus,
+} from '../lib/format'
 
 export function AssetDetailPage() {
   const { id = '' } = useParams()
   const { user } = useAuth()
-  const [asset, setAsset] = useState<AssetDetail | null>(null)
+  const [asset, setAsset] = useState<Asset | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -71,7 +77,9 @@ export function AssetDetailPage() {
             {asset.primary_ip ? ` · ${asset.primary_ip}` : ''}
           </p>
         </div>
-        <span className={`status-chip ${asset.status === 'active' ? 'ok' : ''}`}>{asset.status}</span>
+        <span className={`status-chip ${asset.status === 'active' ? 'ok' : ''}`}>
+          {formatStatus(asset.status)}
+        </span>
       </div>
 
       <section className="panel">
@@ -80,18 +88,20 @@ export function AssetDetailPage() {
           <dt>用途</dt>
           <dd className="pre-wrap">{asset.purpose || '—'}</dd>
           <dt>負責人</dt>
-          <dd>{formatOwner(asset.owner_id, user)}</dd>
+          <dd title={asset.owner_id ?? undefined}>{formatOwner(asset.owner_id, user)}</dd>
           <dt>備援負責人</dt>
-          <dd>{formatOwner(asset.backup_owner_id, user)}</dd>
+          <dd title={asset.backup_owner_id ?? undefined}>
+            {formatOwner(asset.backup_owner_id, user)}
+          </dd>
           <dt>作業系統</dt>
           <dd>{formatOS(asset.os_family, asset.os_detail)}</dd>
           <dt>類型</dt>
-          <dd>{asset.asset_type}</dd>
+          <dd>{formatAssetType(asset.asset_type)}</dd>
           <dt>環境</dt>
-          <dd>{asset.environment}</dd>
+          <dd>{formatEnvironment(asset.environment)}</dd>
           <dt>位置</dt>
           <dd>{asset.location || '—'}</dd>
-          <dt>Hypervisor</dt>
+          <dt>虛擬化平台</dt>
           <dd>{asset.hypervisor || '—'}</dd>
           <dt>標籤</dt>
           <dd>
@@ -106,6 +116,9 @@ export function AssetDetailPage() {
           <dt>設定備註</dt>
           <dd className="pre-wrap">{asset.config_notes || '—'}</dd>
         </dl>
+        <p className="muted hint">
+          其他負責人僅顯示使用者 ID（尚無使用者列表 API）。帳號／排程面板於下一 PR 接上。
+        </p>
       </section>
 
       <div className="panel-grid">
