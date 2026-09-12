@@ -8,7 +8,7 @@ Self-hosted CMDB and credential vault for small infra teams (Phase 1).
 
 **Phase 1 surface is frozen.** Implemented stack: SQLite CMDB + vault, auth/RBAC/step-up, assets, accounts reveal, jobs/notes, export/import, CSP headers, optional `/metrics`, Vite React UI (login, assets, accounts/jobs/notes/reveal).
 
-Canonical HTTP contract: [`api/openapi.yaml`](api/openapi.yaml). Search is `GET /api/v1/assets?q=` (no separate `/search` route). Phase 2 agent/remote paths are documented only under OpenAPI `x-future` — **not registered** in the Go router (no 501 stubs).
+Canonical HTTP contract: [`api/openapi.yaml`](api/openapi.yaml) (validate with `scripts/check-openapi.sh`). Search is `GET /api/v1/assets?q=` — SQL LIKE on `name`/`hostname`/`purpose` only (no FTS5 in this tree); use `?tag=` for tags. No separate `/search` route. Phase 2 agent/remote paths are documented only under OpenAPI `x-future` — **not registered** in the Go router (no 501 stubs).
 
 | Horizon | Item |
 |---------|------|
@@ -180,8 +180,13 @@ sudo chmod 600 /etc/infrawho/master.key
 ### 3. 每日備份到另一台主機
 
 ```bash
-# 在執行 InfraWho 的主機（建議 cron 每日）
-scripts/backup.sh --db /data/infrawho.db --out /var/backups/infrawho
+# Compose：在容器內跑（/data 為 volume 掛載點）
+docker compose exec infrawho \
+  scripts/backup.sh --db /data/infrawho.db --out /var/backups/infrawho
+# 若備份目錄未掛出宿主，改掛 volume 或把 --out 指到已掛載路徑後再 rsync
+
+# 非 Compose／宿主已 bind-mount DB 時（示例路徑請改成實際宿主路徑）
+# scripts/backup.sh --db /var/lib/infrawho/infrawho.db --out /var/backups/infrawho
 
 # 將 tarball 同步到*另一台*主機（示例）
 rsync -a /var/backups/infrawho/ backup-host:/backups/infrawho/
@@ -200,7 +205,12 @@ rsync -a /var/backups/infrawho/ backup-host:/backups/infrawho/
 3. 還原到暫存路徑並驗證：
 
 ```bash
-scripts/restore.sh --archive /path/to/infrawho-backup-….tar.gz --db /tmp/infrawho-restore.db
+# 宿主路徑示例（還原到暫存檔，勿直接覆寫線上 volume 前請確認）
+scripts/restore.sh --archive /path/to/infrawho-backup-….tar.gz \
+  --db /tmp/infrawho-restore.db
+# 或以容器：先把 archive 掛進容器，再
+# docker compose run --rm -v "$PWD/backup.tgz:/backup.tgz:ro" infrawho \
+#   scripts/restore.sh --archive /backup.tgz --db /tmp/infrawho-restore.db
 # 以還原 DB + 同一把 KEK 啟動實驗室實例，抽樣 GET /readyz 與一筆非關鍵 reveal
 ```
 
@@ -272,7 +282,7 @@ Pagination uses `limit` (default 50, max 200) + `offset` (default 0). Soft-delet
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/v1/assets` | List; filters: `q`, `tag`, `environment`, `status`, `include_deleted` |
+| `GET` | `/api/v1/assets` | List; `q` = LIKE on name/hostname/purpose (no FTS5); also `tag`, `environment`, `status`, `include_deleted` |
 | `POST` | `/api/v1/assets` | Create (operator+); body may include `tags` |
 | `GET` | `/api/v1/assets/{id}` | Detail + accounts/jobs/notes summaries (no secrets) |
 | `PATCH` | `/api/v1/assets/{id}` | Update metadata; rejects `deleted_at` / `status=retired` (422) |

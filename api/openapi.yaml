@@ -23,7 +23,9 @@ info:
     (`POST /api/v1/auth/step-up`, valid 5 minutes).
 
     Pagination (K12): `limit` (default 50, max 200) + `offset` (default 0) only.
-    Search: FTS/LIKE via `GET /api/v1/assets?q=` — no separate `/search` route.
+    Search: `GET /api/v1/assets?q=` uses SQL LIKE on `name`/`hostname`/`purpose`
+    only (no FTS5 in this Phase 1 tree). Tag filter is separate `?tag=`.
+    No dedicated `/search` route.
   license:
     name: MIT
 
@@ -63,8 +65,10 @@ x-future:
       path: /api/v1/assets/{id}/sessions
       summary: Start remote session (reserved)
   concepts:
-    - AgentRegistration: { asset_id, agent_id, last_seen, capabilities[] }
-    - RemoteSession: { id, asset_id, protocol, started_by, ... }
+    - name: AgentRegistration
+      fields: "asset_id, agent_id, last_seen, capabilities[]"
+    - name: RemoteSession
+      fields: "id, asset_id, protocol, started_by, ..."
 
 x-phase15:
   must_do:
@@ -169,14 +173,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Me"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "503":
-          description: Master key not ready
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
+          $ref: "#/components/responses/NotReady"
 
   /api/v1/setup/acknowledge:
     post:
@@ -226,6 +230,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Me"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "429":
@@ -287,7 +293,8 @@ paths:
       summary: List assets (supports q search + filters)
       description: |
         Soft-deleted rows omitted unless `include_deleted=true`.
-        `q` searches non-secret fields (name, hostname, purpose, tags, etc.).
+        `q` is SQL LIKE over `name`, `hostname`, and `purpose` only (no FTS5).
+        Use `tag=` for exact tag filter (not covered by `q`).
       operationId: listAssets
       security:
         - sessionCookie: []
@@ -298,11 +305,12 @@ paths:
           in: query
           schema:
             type: string
-          description: Search query over non-secret indexed fields
+          description: LIKE match on name, hostname, purpose only (no FTS5)
         - name: tag
           in: query
           schema:
             type: string
+          description: Exact tag name filter (separate from q)
         - name: environment
           in: query
           schema:
@@ -378,6 +386,7 @@ paths:
       description: |
         Rejects body fields `deleted_at` or `status=retired` with 422
         (`validation_error`). Soft-delete only via DELETE.
+        409 when the asset is already soft-deleted or hostname conflicts.
       operationId: patchAsset
       security:
         - sessionCookie: []
@@ -398,6 +407,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/ValidationError"
     delete:
@@ -457,6 +468,7 @@ paths:
     post:
       tags: [accounts]
       summary: Create account (optional secret)
+      description: When `secret` is set, requires a loadable KEK (else 503 `not_ready`).
       operationId: createAccount
       security:
         - sessionCookie: []
@@ -481,6 +493,8 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/ValidationError"
+        "503":
+          $ref: "#/components/responses/NotReady"
 
   /api/v1/accounts/{id}:
     parameters:
@@ -531,7 +545,7 @@ paths:
       summary: Decrypt secret (operator+ + step-up)
       description: |
         Rate-limited 30/session/min. Audit `CREDENTIAL_REVEAL`.
-        Response `Cache-Control: no-store`.
+        Response `Cache-Control: no-store`. 503 if KEK unavailable.
       operationId: revealAccount
       security:
         - sessionCookie: []
@@ -557,6 +571,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/NotReady"
 
   /api/v1/accounts/{id}/rotate-secret:
     parameters:
@@ -564,7 +580,9 @@ paths:
     post:
       tags: [accounts]
       summary: Replace secret (optional new auth_type)
-      description: Re-encrypts under new AAD when auth_type changes. Audit `CREDENTIAL_ROTATE`.
+      description: |
+        Operator+. Step-up is **not** required. Re-encrypts under new AAD when
+        auth_type changes. Audit `CREDENTIAL_ROTATE`. 503 if KEK unavailable.
       operationId: rotateSecret
       security:
         - sessionCookie: []
@@ -585,6 +603,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/ValidationError"
+        "503":
+          $ref: "#/components/responses/NotReady"
 
   /api/v1/assets/{id}/jobs:
     parameters:
@@ -834,6 +854,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429":
           $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/NotReady"
 
   /api/v1/import:
     post:
@@ -879,6 +901,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "422":
           $ref: "#/components/responses/ValidationError"
+        "503":
+          $ref: "#/components/responses/NotReady"
 
 components:
   securitySchemes:
@@ -913,6 +937,12 @@ components:
         default: 0
 
   responses:
+    BadRequest:
+      description: Invalid JSON / validation (auth+setup often use 400)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     Unauthorized:
       description: Not authenticated
       content:
@@ -938,13 +968,19 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     ValidationError:
-      description: Validation error
+      description: Validation error (typically 422 on resource PATCH/POST)
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     RateLimited:
       description: Rate limited or lockout
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotReady:
+      description: Master key (KEK) unavailable — error code `not_ready`
       content:
         application/json:
           schema:
@@ -1122,8 +1158,8 @@ components:
             type: string
         deleted_at:
           type: string
-          nullable: true
           format: date-time
+          description: Present only when soft-deleted; omitted (not null) when active (`omitempty`)
         created_at:
           type: string
           format: date-time
@@ -1145,8 +1181,8 @@ components:
           type: string
         last_rotated_at:
           type: string
-          nullable: true
           format: date-time
+          description: Omitted when never rotated (`omitempty`); not emitted as JSON null
         has_secret:
           type: boolean
 
@@ -1316,8 +1352,8 @@ components:
           type: string
         last_rotated_at:
           type: string
-          nullable: true
           format: date-time
+          description: Omitted when never rotated (`omitempty`); not emitted as JSON null
         has_secret:
           type: boolean
         created_at:
