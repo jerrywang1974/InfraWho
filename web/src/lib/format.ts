@@ -67,13 +67,13 @@ export function formatRole(role: string): string {
 const authTypeLabels: Record<string, string> = {
   password: '密碼',
   ssh_private_key: 'SSH 私鑰',
-  api_token: 'API Token',
+  api_token: 'API 權杖',
   other: '其他',
 }
 
 const schedulerLabels: Record<string, string> = {
   cron: 'cron',
-  systemd_timer: 'systemd timer',
+  systemd_timer: 'systemd 計時器',
   windows_task: 'Windows 工作排程',
   other: '其他',
 }

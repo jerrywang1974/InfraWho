@@ -568,3 +568,13 @@ textarea {
   border-radius: 8px;
   background: var(--panel);
 }
+
+.secret-input-row {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.secret-input-row input {
+  flex: 1;
+}

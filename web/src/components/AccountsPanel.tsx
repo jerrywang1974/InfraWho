@@ -10,7 +10,7 @@ import { StepUpModal } from './StepUpModal'
 const AUTH_TYPES = [
   { value: 'password', label: '密碼' },
   { value: 'ssh_private_key', label: 'SSH 私鑰' },
-  { value: 'api_token', label: 'API Token' },
+  { value: 'api_token', label: 'API 權杖' },
   { value: 'other', label: '其他' },
 ] as const
 
@@ -31,7 +31,7 @@ type Revealed = {
 }
 
 export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChanged }: Props) {
-  const { user, refresh } = useAuth()
+  const { user, refreshUserQuiet } = useAuth()
   const [showCreate, setShowCreate] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -42,26 +42,24 @@ export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChange
   const [stepUpOpen, setStepUpOpen] = useState(false)
   const pendingRevealId = useRef<string | null>(null)
   const clipboardTimer = useRef<number | null>(null)
-  const secretRef = useRef<string | null>(null)
+  const clipboardPendingClear = useRef(false)
 
-  // Clear plaintext from React state + ref on unmount / navigate away.
+  // Drop React plaintext on unmount; best-effort clipboard clear if a clear was scheduled.
   useEffect(() => {
     return () => {
-      secretRef.current = null
       if (clipboardTimer.current != null) {
         window.clearTimeout(clipboardTimer.current)
         clipboardTimer.current = null
       }
+      if (clipboardPendingClear.current) {
+        clipboardPendingClear.current = false
+        void clearClipboard()
+      }
     }
   }, [])
 
-  useEffect(() => {
-    secretRef.current = revealed?.secret ?? null
-  }, [revealed])
-
   function clearReveal() {
     setRevealed(null)
-    secretRef.current = null
   }
 
   function scheduleClipboardClear(seconds: number) {
@@ -69,8 +67,13 @@ export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChange
       window.clearTimeout(clipboardTimer.current)
       clipboardTimer.current = null
     }
-    if (seconds <= 0) return
+    if (seconds <= 0) {
+      clipboardPendingClear.current = false
+      return
+    }
+    clipboardPendingClear.current = true
     clipboardTimer.current = window.setTimeout(() => {
+      clipboardPendingClear.current = false
       void clearClipboard().then((ok) => {
         setClipboardWarn(
           ok
@@ -89,8 +92,8 @@ export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChange
     try {
       const res = await api.revealAccount(accountId)
       setRevealed({ accountId, secret: res.secret, visible: false })
-      secretRef.current = res.secret
-      void refresh()
+      // Quiet me() refresh for step_up_active hint — must not flip Auth loading.
+      void refreshUserQuiet()
     } catch (err) {
       if (err instanceof ApiError && err.code === 'step_up_required') {
         pendingRevealId.current = accountId
@@ -108,9 +111,8 @@ export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChange
   }
 
   async function onCopy(accountId: string) {
-    const secret =
-      revealed?.accountId === accountId ? revealed.secret : secretRef.current
-    if (!secret || revealed?.accountId !== accountId) {
+    const secret = revealed?.accountId === accountId ? revealed.secret : null
+    if (!secret) {
       setError('請先揭示後再複製')
       return
     }
@@ -140,6 +142,11 @@ export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChange
     } finally {
       setBusyId(null)
     }
+  }
+
+  function onRotateDone(accountId: string) {
+    if (revealed?.accountId === accountId) clearReveal()
+    onChanged()
   }
 
   return (
@@ -194,7 +201,9 @@ export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChange
               max={300}
               value={clearAfterSec}
               disabled={!autoClearClipboard}
-              onChange={(e) => setClearAfterSec(Math.max(5, Number(e.target.value) || 30))}
+              onChange={(e) =>
+                setClearAfterSec(Math.min(300, Math.max(5, Number(e.target.value) || 30)))
+              }
             />
           </label>
         </div>
@@ -242,7 +251,7 @@ export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChange
                           清除畫面
                         </button>
                       </div>
-                      <pre className="secret-value" aria-label="revealed secret">
+                      <pre className="secret-value" aria-label="已揭示的密文">
                         {revealed.visible ? revealed.secret : '••••••••••••'}
                       </pre>
                     </div>
@@ -260,11 +269,21 @@ export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChange
                       {busyId === acc.id ? '揭示中…' : isRevealed ? '重新揭示' : '揭示'}
                     </button>
                   ) : null}
+                  {canWrite ? <EditAccountForm account={acc} onDone={onChanged} /> : null}
                   {canWrite && acc.has_secret ? (
-                    <RotateSecretForm accountId={acc.id} onDone={onChanged} />
+                    <RotateSecretForm
+                      accountId={acc.id}
+                      authType={acc.auth_type}
+                      onDone={() => onRotateDone(acc.id)}
+                    />
                   ) : null}
                   {canWrite && !acc.has_secret ? (
-                    <RotateSecretForm accountId={acc.id} onDone={onChanged} label="設定密文" />
+                    <RotateSecretForm
+                      accountId={acc.id}
+                      authType={acc.auth_type}
+                      onDone={() => onRotateDone(acc.id)}
+                      label="設定密文"
+                    />
                   ) : null}
                   {canWrite ? (
                     <button
@@ -293,7 +312,7 @@ export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChange
         }}
         onSuccess={() => {
           setStepUpOpen(false)
-          void refresh()
+          void refreshUserQuiet()
           const id = pendingRevealId.current
           pendingRevealId.current = null
           if (id) void doReveal(id)
@@ -301,6 +320,10 @@ export function AccountsPanel({ assetId, accounts, canWrite, canReveal, onChange
       />
     </section>
   )
+}
+
+function secretInputIsMasked(authType: string): boolean {
+  return authType === 'password' || authType === 'api_token'
 }
 
 function CreateAccountForm({
@@ -316,6 +339,7 @@ function CreateAccountForm({
   const [authType, setAuthType] = useState('password')
   const [description, setDescription] = useState('')
   const [secret, setSecret] = useState('')
+  const [showSecret, setShowSecret] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -338,6 +362,8 @@ function CreateAccountForm({
       setBusy(false)
     }
   }
+
+  const masked = secretInputIsMasked(authType)
 
   return (
     <form className="form-card nested-form" onSubmit={onSubmit}>
@@ -363,12 +389,30 @@ function CreateAccountForm({
         </label>
         <label className="span-2">
           密文（可留空＝密碼未知）
-          <textarea
-            rows={3}
-            value={secret}
-            onChange={(e) => setSecret(e.target.value)}
-            autoComplete="off"
-          />
+          {masked ? (
+            <div className="secret-input-row">
+              <input
+                type={showSecret ? 'text' : 'password'}
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                autoComplete="off"
+              />
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setShowSecret((v) => !v)}
+              >
+                {showSecret ? '隱藏' : '顯示'}
+              </button>
+            </div>
+          ) : (
+            <textarea
+              rows={3}
+              value={secret}
+              onChange={(e) => setSecret(e.target.value)}
+              autoComplete="off"
+            />
+          )}
         </label>
       </div>
       {error ? <p className="error">{error}</p> : null}
@@ -384,18 +428,16 @@ function CreateAccountForm({
   )
 }
 
-function RotateSecretForm({
-  accountId,
+function EditAccountForm({
+  account,
   onDone,
-  label = '輪替密文',
 }: {
-  accountId: string
+  account: AccountSummary
   onDone: () => void
-  label?: string
 }) {
   const [open, setOpen] = useState(false)
-  const [secret, setSecret] = useState('')
-  const [authType, setAuthType] = useState('')
+  const [username, setUsername] = useState(account.username)
+  const [description, setDescription] = useState(account.description)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -404,9 +446,95 @@ function RotateSecretForm({
     setBusy(true)
     setError(null)
     try {
+      await api.patchAccount(account.id, {
+        username: username.trim(),
+        description,
+      })
+      setOpen(false)
+      onDone()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '更新失敗')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="btn"
+        onClick={() => {
+          setUsername(account.username)
+          setDescription(account.description)
+          setOpen(true)
+        }}
+      >
+        編輯
+      </button>
+    )
+  }
+
+  return (
+    <form className="nested-form rotate-form" onSubmit={onSubmit}>
+      <label>
+        使用者名稱
+        <input value={username} onChange={(e) => setUsername(e.target.value)} required />
+      </label>
+      <label>
+        說明
+        <input value={description} onChange={(e) => setDescription(e.target.value)} />
+      </label>
+      {account.has_secret ? (
+        <p className="muted hint">已有密文時不可只改驗證類型；請用輪替密文。</p>
+      ) : null}
+      {error ? <p className="error">{error}</p> : null}
+      <div className="row-actions">
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => setOpen(false)}
+          disabled={busy}
+        >
+          取消
+        </button>
+        <button type="submit" className="btn btn-primary" disabled={busy}>
+          {busy ? '儲存中…' : '儲存'}
+        </button>
+      </div>
+    </form>
+  )
+}
+
+function RotateSecretForm({
+  accountId,
+  authType,
+  onDone,
+  label = '輪替密文',
+}: {
+  accountId: string
+  authType: string
+  onDone: () => void
+  label?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [secret, setSecret] = useState('')
+  const [nextAuthType, setNextAuthType] = useState('')
+  const [showSecret, setShowSecret] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const effectiveType = nextAuthType || authType
+  const masked = secretInputIsMasked(effectiveType)
+
+  async function onSubmit(e: FormEvent) {
+    e.preventDefault()
+    setBusy(true)
+    setError(null)
+    try {
       await api.rotateSecret(accountId, {
         secret,
-        auth_type: authType || undefined,
+        auth_type: nextAuthType || undefined,
       })
       setSecret('')
       setOpen(false)
@@ -430,17 +558,32 @@ function RotateSecretForm({
     <form className="nested-form rotate-form" onSubmit={onSubmit}>
       <label>
         新密文
-        <textarea
-          rows={2}
-          value={secret}
-          onChange={(e) => setSecret(e.target.value)}
-          required
-          autoComplete="off"
-        />
+        {masked ? (
+          <div className="secret-input-row">
+            <input
+              type={showSecret ? 'text' : 'password'}
+              value={secret}
+              onChange={(e) => setSecret(e.target.value)}
+              required
+              autoComplete="off"
+            />
+            <button type="button" className="btn" onClick={() => setShowSecret((v) => !v)}>
+              {showSecret ? '隱藏' : '顯示'}
+            </button>
+          </div>
+        ) : (
+          <textarea
+            rows={2}
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            required
+            autoComplete="off"
+          />
+        )}
       </label>
       <label>
         可選：同時變更類型
-        <select value={authType} onChange={(e) => setAuthType(e.target.value)}>
+        <select value={nextAuthType} onChange={(e) => setNextAuthType(e.target.value)}>
           <option value="">（維持原類型）</option>
           {AUTH_TYPES.map((t) => (
             <option key={t.value} value={t.value}>

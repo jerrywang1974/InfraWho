@@ -6,7 +6,7 @@ import { formatSchedulerType } from '../lib/format'
 
 const SCHEDULER_TYPES = [
   { value: 'cron', label: 'cron' },
-  { value: 'systemd_timer', label: 'systemd timer' },
+  { value: 'systemd_timer', label: 'systemd 計時器' },
   { value: 'windows_task', label: 'Windows 工作排程' },
   { value: 'other', label: '其他' },
 ] as const
@@ -21,6 +21,7 @@ export function JobsPanel({ assetId, canWrite }: Props) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showCreate, setShowCreate] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
@@ -81,14 +82,15 @@ export function JobsPanel({ assetId, canWrite }: Props) {
           </button>
         ) : null}
       </div>
-      <p className="muted hint">文件化紀錄（documented, not verified）— 非自動發現。</p>
+      <p className="muted hint">僅文件紀錄，未驗證實際執行狀態 — 非自動發現。</p>
 
       {showCreate && canWrite ? (
-        <CreateJobForm
-          assetId={assetId}
-          onCreated={() => {
+        <JobForm
+          submitLabel="建立"
+          onSubmit={async (body) => {
+            await api.createJob(assetId, body)
             setShowCreate(false)
-            void load()
+            await load()
           }}
           onCancel={() => setShowCreate(false)}
         />
@@ -102,44 +104,62 @@ export function JobsPanel({ assetId, canWrite }: Props) {
       <ul className="item-list">
         {items.map((job) => (
           <li key={job.id} className="item-card">
-            <div className="item-main">
-              <div className="item-title">
-                <strong>{job.name}</strong>
-                <span className="tag">{formatSchedulerType(job.scheduler_type)}</span>
-                <span className={`status-chip ${job.enabled_doc ? 'ok' : ''}`}>
-                  {job.enabled_doc ? '文件：啟用' : '文件：停用'}
-                </span>
-              </div>
-              {job.schedule_expr ? (
-                <p>
-                  <code>{job.schedule_expr}</code>
-                </p>
-              ) : null}
-              {job.command_or_path ? (
-                <p className="pre-wrap mono-sm">{job.command_or_path}</p>
-              ) : null}
-              {job.description ? <p className="muted pre-wrap">{job.description}</p> : null}
-            </div>
-            {canWrite ? (
-              <div className="item-actions">
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={busyId === job.id}
-                  onClick={() => void toggleEnabled(job)}
-                >
-                  {job.enabled_doc ? '標為停用' : '標為啟用'}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-danger"
-                  disabled={busyId === job.id}
-                  onClick={() => void onDelete(job.id)}
-                >
-                  刪除
-                </button>
-              </div>
-            ) : null}
+            {editingId === job.id ? (
+              <JobForm
+                submitLabel="儲存"
+                initial={job}
+                onSubmit={async (body) => {
+                  await api.patchJob(job.id, body)
+                  setEditingId(null)
+                  await load()
+                }}
+                onCancel={() => setEditingId(null)}
+              />
+            ) : (
+              <>
+                <div className="item-main">
+                  <div className="item-title">
+                    <strong>{job.name}</strong>
+                    <span className="tag">{formatSchedulerType(job.scheduler_type)}</span>
+                    <span className={`status-chip ${job.enabled_doc ? 'ok' : ''}`}>
+                      {job.enabled_doc ? '文件：啟用' : '文件：停用'}
+                    </span>
+                  </div>
+                  {job.schedule_expr ? (
+                    <p>
+                      <code>{job.schedule_expr}</code>
+                    </p>
+                  ) : null}
+                  {job.command_or_path ? (
+                    <p className="pre-wrap mono-sm">{job.command_or_path}</p>
+                  ) : null}
+                  {job.description ? <p className="muted pre-wrap">{job.description}</p> : null}
+                </div>
+                {canWrite ? (
+                  <div className="item-actions">
+                    <button type="button" className="btn" onClick={() => setEditingId(job.id)}>
+                      編輯
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busyId === job.id}
+                      onClick={() => void toggleEnabled(job)}
+                    >
+                      {job.enabled_doc ? '標為停用' : '標為啟用'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      disabled={busyId === job.id}
+                      onClick={() => void onDelete(job.id)}
+                    >
+                      刪除
+                    </button>
+                  </div>
+                ) : null}
+              </>
+            )}
           </li>
         ))}
       </ul>
@@ -147,30 +167,39 @@ export function JobsPanel({ assetId, canWrite }: Props) {
   )
 }
 
-function CreateJobForm({
-  assetId,
-  onCreated,
+function JobForm({
+  initial,
+  submitLabel,
+  onSubmit,
   onCancel,
 }: {
-  assetId: string
-  onCreated: () => void
+  initial?: ScheduledJob
+  submitLabel: string
+  onSubmit: (body: {
+    name: string
+    scheduler_type: string
+    schedule_expr: string
+    command_or_path: string
+    description: string
+    enabled_doc: boolean
+  }) => Promise<void>
   onCancel: () => void
 }) {
-  const [name, setName] = useState('')
-  const [schedulerType, setSchedulerType] = useState('cron')
-  const [scheduleExpr, setScheduleExpr] = useState('')
-  const [commandOrPath, setCommandOrPath] = useState('')
-  const [description, setDescription] = useState('')
-  const [enabledDoc, setEnabledDoc] = useState(true)
+  const [name, setName] = useState(initial?.name ?? '')
+  const [schedulerType, setSchedulerType] = useState(initial?.scheduler_type ?? 'cron')
+  const [scheduleExpr, setScheduleExpr] = useState(initial?.schedule_expr ?? '')
+  const [commandOrPath, setCommandOrPath] = useState(initial?.command_or_path ?? '')
+  const [description, setDescription] = useState(initial?.description ?? '')
+  const [enabledDoc, setEnabledDoc] = useState(initial?.enabled_doc ?? true)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  async function onSubmit(e: FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError(null)
     try {
-      await api.createJob(assetId, {
+      await onSubmit({
         name: name.trim(),
         scheduler_type: schedulerType,
         schedule_expr: scheduleExpr,
@@ -178,17 +207,16 @@ function CreateJobForm({
         description,
         enabled_doc: enabledDoc,
       })
-      onCreated()
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : '建立失敗')
+      setError(err instanceof ApiError ? err.message : '儲存失敗')
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <form className="form-card nested-form" onSubmit={onSubmit}>
-      <h3>新增排程文件</h3>
+    <form className="form-card nested-form" onSubmit={handleSubmit}>
+      <h3>{initial ? '編輯排程文件' : '新增排程文件'}</h3>
       <div className="form-grid">
         <label>
           名稱
@@ -239,7 +267,7 @@ function CreateJobForm({
           取消
         </button>
         <button type="submit" className="btn btn-primary" disabled={busy}>
-          {busy ? '建立中…' : '建立'}
+          {busy ? '儲存中…' : submitLabel}
         </button>
       </div>
     </form>

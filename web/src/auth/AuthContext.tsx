@@ -16,6 +16,8 @@ type AuthState = {
   user: User | null
   setup: SetupStatus | null
   refresh: () => Promise<void>
+  /** Refresh `/me` without flipping global `loading` (keeps SPA mounted). */
+  refreshUserQuiet: () => Promise<void>
   setUser: (user: User | null) => void
   setSetup: (setup: SetupStatus | null) => void
   /** Resolves only after the server clears the session cookie. */
@@ -62,14 +64,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void refresh()
   }, [refresh])
 
+  const refreshUserQuiet = useCallback(async () => {
+    try {
+      const u = await api.me()
+      setUser(u)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setUser(null)
+      }
+    }
+  }, [])
+
   const logout = useCallback(async () => {
     await api.logout()
     setUser(null)
   }, [])
 
   const value = useMemo(
-    () => ({ loading, user, setup, refresh, setUser, setSetup, logout }),
-    [loading, user, setup, refresh, logout],
+    () => ({ loading, user, setup, refresh, refreshUserQuiet, setUser, setSetup, logout }),
+    [loading, user, setup, refresh, refreshUserQuiet, logout],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
