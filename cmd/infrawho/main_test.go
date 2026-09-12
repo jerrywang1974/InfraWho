@@ -11,6 +11,7 @@ import (
 
 	"github.com/jerrywang1974/InfraWho/internal/config"
 	"github.com/jerrywang1974/InfraWho/internal/db"
+	"github.com/jerrywang1974/InfraWho/internal/security"
 )
 
 func TestDispatchRejectsUnknownCommand(t *testing.T) {
@@ -94,4 +95,61 @@ func TestReadyzKEKUnavailable(t *testing.T) {
 	if body := rec.Body.String(); !strings.Contains(body, "master key unavailable") {
 		t.Fatalf("body = %q", body)
 	}
+}
+
+func TestSecurityHeadersOnHealthz(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", handleHealthz)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	security.Headers(mux).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); csp == "" {
+		t.Fatal("expected CSP header")
+	}
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("expected nosniff")
+	}
+}
+
+func TestMetricsRouteGatedByFlag(t *testing.T) {
+	sqlDB, err := db.Open("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer sqlDB.Close()
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "master.key")
+	key := make([]byte, config.MasterKeySize)
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("disabled", func(t *testing.T) {
+		mux := http.NewServeMux()
+		registerRoutes(mux, &config.Config{MasterKeyFile: keyPath, FeatureMetrics: false}, sqlDB)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 when FEATURE_METRICS off", rec.Code)
+		}
+	})
+
+	t.Run("enabled", func(t *testing.T) {
+		mux := http.NewServeMux()
+		registerRoutes(mux, &config.Config{MasterKeyFile: keyPath, FeatureMetrics: true}, sqlDB)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body %q", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "login_failures_total") {
+			t.Fatalf("body = %q", rec.Body.String())
+		}
+	})
 }

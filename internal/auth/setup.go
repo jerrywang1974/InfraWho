@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jerrywang1974/InfraWho/internal/metrics"
 )
 
 type setupStatusResponse struct {
@@ -63,6 +65,7 @@ func (h *Handler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := h.ip(r)
 	if !h.limiter.Allow("bootstrap:ip:"+ip, h.bootstrapIPLimit, bootstrapWindow) {
+		metrics.IncRateLimited()
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many setup attempts")
 		return
 	}

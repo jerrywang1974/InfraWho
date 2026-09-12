@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jerrywang1974/InfraWho/internal/config"
+	"github.com/jerrywang1974/InfraWho/internal/metrics"
 	"github.com/jerrywang1974/InfraWho/internal/ratelimit"
 )
 
@@ -144,6 +145,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	ip := h.ip(r)
 	if !h.limiter.Allow("login:ip:"+ip, h.loginIPLimit, loginWindow) {
+		metrics.IncRateLimited()
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts")
 		return
 	}
@@ -161,6 +163,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	userKey := strings.ToLower(req.Username)
 	if !h.limiter.Allow("login:user:"+userKey, h.loginUserLimit, loginWindow) {
+		metrics.IncRateLimited()
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts")
 		return
 	}
@@ -206,6 +209,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) failLogin(w http.ResponseWriter, r *http.Request, actorID *string, username, ip string) {
+	metrics.IncLoginFailures()
 	userKey := strings.ToLower(username)
 	locked := h.lockout.Fail(userKey, h.lockoutThreshold, lockoutDuration)
 	action := "LOGIN_FAILURE"
@@ -289,6 +293,7 @@ func (h *Handler) StepUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.limiter.Allow("stepup:session:"+sess.ID, h.stepUpSessionLimit, stepUpWindow) {
+		metrics.IncRateLimited()
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many step-up attempts")
 		return
 	}

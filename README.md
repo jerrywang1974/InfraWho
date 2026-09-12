@@ -6,7 +6,7 @@ Self-hosted CMDB and credential vault for small infra teams (Phase 1).
 
 ## Status
 
-Auth + assets + vault: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, asset CRUD (soft-delete / purge), credential vault crypto (`internal/vault`), `infrawho keys rewrap` CLI, `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Accounts reveal API and UI come in later PRs.
+Auth + assets API: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, asset CRUD (soft-delete / purge), CSP/security headers, optional `/metrics`, `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Web UI Phase 1 shell (login, setup wizard, asset list/detail) lives under [`web/`](web/). Vault accounts/jobs UI panels come in a later PR.
 
 ## Requirements
 
@@ -19,12 +19,11 @@ Auth + assets + vault: config loading, SQLite open + auto-migrate, session cooki
 |----------|---------|--------|
 | `INFRAWHO_DB_URL` | `sqlite:///data/infrawho.db` | Phase 1 **SQLite only**. Non-`sqlite:` schemes fail at startup. Parent dirs are created; embedded migrations run on open. |
 | `INFRAWHO_MASTER_KEY_FILE` | _(empty)_ | Path to KEK file (32 raw bytes **or** base64 of 32 bytes). Preferred over env-embedded keys. |
-| `INFRAWHO_KEY_VERSION` | `kek-v1` | Label stamped on new `secret_payloads.key_version` (must identify the loaded KEK). Update after rewrap when switching to a new KEK. |
 | `INFRAWHO_LISTEN_ADDR` | `:8080` | HTTP listen address. |
 | `INFRAWHO_COOKIE_SECURE` | `true` | Set `false` for plain-HTTP lab (Compose does this). Production behind TLS should keep `true`. |
-| `INFRAWHO_TRUSTED_ORIGINS` | _(empty)_ | Optional comma-separated origins (`https://app.example`) or bare hosts. Scheme-bearing entries match that scheme only. |
-| `INFRAWHO_TRUST_PROXY` | `false` | When `true`, honor `X-Forwarded-Host` / `X-Forwarded-For` from an upstream reverse proxy. Leave `false` when clients can reach the process directly. |
-| `FEATURE_EXPORT_SECRETS` | `false` | When `true`, allows `POST /api/v1/export` with `include_secrets:true` (still requires admin + step-up + audit). |
+| `INFRAWHO_TRUSTED_ORIGINS` | _(empty)_ | Optional comma-separated origins (`https://app.example`) or bare hosts. Scheme-bearing entries match that scheme only. Used for CSRF Origin checks behind a different public host. |
+| `INFRAWHO_TRUST_PROXY` | `false` | When `true`, honor `X-Forwarded-Host` / `X-Forwarded-For` from an upstream reverse proxy. Leave `false` when clients can reach the process directly (spoof risk). |
+| `INFRAWHO_FEATURE_METRICS` | `false` | Design `FEATURE_METRICS`. When `true`, registers `GET /metrics` (Prometheus text: `login_failures_total`, `reveal_total`, `rate_limited_total`). Not Ops Minimum. |
 
 ### Master key (KEK)
 
@@ -45,31 +44,6 @@ chmod 600 lab-master.key
 ```
 
 Production-oriented placement: host path such as `/etc/infrawho/master.key` with mode `0600`, bind-mounted read-only into the container. Keep an offline copy of the KEK separate from DB backups — losing the KEK makes ciphertext permanently unrecoverable.
-
-### KEK rotation (stop-the-world)
-
-Secrets use envelope encryption: a per-secret DEK (AES-256-GCM) is wrapped by the KEK. Rotation is a **foreground** classic DEK rewrap — it unwraps/wraps DEKs and updates `key_version` only; `nonce` / `ciphertext` are unchanged.
-
-**Runbook:**
-
-1. **Stop** the HTTP service (`docker compose stop infrawho` or equivalent).
-2. Generate the new KEK file, then run:
-
-```bash
-infrawho keys rewrap --from kek-v1 --to kek-v2 \
-  --old-key-file /etc/infrawho/master-v1.key \
-  --new-key-file /etc/infrawho/master-v2.key
-```
-
-Uses `INFRAWHO_DB_URL`. Re-run if interrupted; keep **both** key files until `remaining_from=0`. Do **not** start the app mid-rotation.
-
-3. Point `INFRAWHO_MASTER_KEY_FILE` **only** at the new key, and set `INFRAWHO_KEY_VERSION` to the `--to` value (e.g. `kek-v2`) so new create/rotate stamps match the loaded KEK.
-4. **Start** the service; confirm `GET /readyz` and sample a reveal on a non-critical account.
-5. Destroy the old KEK only after checklist confirmation (`COUNT` of old `key_version` is 0).
-
-```bash
-infrawho keys --help   # prints the same runbook
-```
 
 ## Run locally
 
@@ -106,12 +80,49 @@ curl -sS http://127.0.0.1:8080/readyz   # expect ok
 
 Compose bind-mounts `./lab-master.key` to `/etc/infrawho/master.key` and stores SQLite under the `infrawho_data` volume.
 
+The image runs as root by default so lab `0600` key bind-mounts stay readable. For production, prefer `docker run --user` matching the key file owner (or Docker/Podman secrets) — see comments in [`Dockerfile`](Dockerfile). Do not bake a fixed non-root `USER` into the image if lab keys are root-owned.
+
 ## Health endpoints
 
 | Path | Behavior |
 |------|----------|
 | `GET /healthz` | Liveness — always `200` if the process is up. |
 | `GET /readyz` | Readiness — `200` when the DB pings and `INFRAWHO_MASTER_KEY_FILE` loads; otherwise `503`. |
+| `GET /metrics` | Optional Prometheus text counters; only registered when `INFRAWHO_FEATURE_METRICS=true`. No app auth — scrape from loopback/trusted network only (or protect at the proxy). |
+
+All responses include CSP and related browser hardening headers (`Content-Security-Policy`, `X-Content-Type-Options`, `X-Frame-Options`, etc.). HSTS is **not** set by the app — configure it on the TLS-terminating reverse proxy.
+
+## Production / reverse proxy
+
+Bind the app to loopback and terminate TLS at your org proxy. Example env:
+
+```bash
+export INFRAWHO_LISTEN_ADDR='127.0.0.1:8080'
+export INFRAWHO_TRUST_PROXY=true
+export INFRAWHO_TRUSTED_ORIGINS='https://infrawho.example'
+export INFRAWHO_COOKIE_SECURE=true
+export INFRAWHO_MASTER_KEY_FILE=/etc/infrawho/master.key
+# optional:
+# export INFRAWHO_FEATURE_METRICS=true
+```
+
+Nginx sketch: [`docs/reverse-proxy.example.conf`](docs/reverse-proxy.example.conf) (forwards `X-Forwarded-Host` / `X-Forwarded-For` / `X-Forwarded-Proto`, sets HSTS). Only enable `INFRAWHO_TRUST_PROXY` when the proxy is the sole path to the process.
+
+## Web UI (lab)
+
+React + Vite SPA in [`web/`](web/). UI strings are Traditional Chinese.
+
+```bash
+# API (cookie Secure off for plain HTTP lab)
+export INFRAWHO_COOKIE_SECURE=false
+# …plus DB URL / master key / listen addr as above…
+go run ./cmd/infrawho
+
+# SPA (proxies /api to :8080; Host stays localhost:5173 so Origin checks match)
+cd web && npm install && npm run dev
+```
+
+`INFRAWHO_TRUSTED_ORIGINS` is optional for the default Vite lab proxy (`changeOrigin: false`). See [`web/README.md`](web/README.md). Production embedding of `web/dist` from Go is deferred.
 
 ## Auth & first-run setup
 
@@ -139,33 +150,6 @@ Pagination uses `limit` (default 50, max 200) + `offset` (default 0). Soft-delet
 | `PATCH` | `/api/v1/assets/{id}` | Update metadata; rejects `deleted_at` / `status=retired` (422) |
 | `DELETE` | `/api/v1/assets/{id}` | Soft-delete (`status=retired`, `deleted_at=now`); admin + step-up |
 | `POST` | `/api/v1/assets/{id}/purge` | Hard-delete soft-deleted asset and cascaded rows; admin + step-up (409 if still active) |
-
-## Accounts & vault
-
-Secrets are optional per account. List/detail responses never include ciphertext. Reveal requires **operator+**, valid **step-up**, and is rate-limited (30/session/min). Responses use `Cache-Control: no-store`. When a secret exists, `auth_type` cannot be changed via `PATCH` (use `rotate-secret`).
-
-| Method | Path | Notes |
-|--------|------|-------|
-| `POST` | `/api/v1/assets/{id}/accounts` | Create account; optional `secret` (encrypted at rest) |
-| `PATCH` | `/api/v1/accounts/{id}` | Metadata only; rejects `auth_type` change when `has_secret` |
-| `DELETE` | `/api/v1/accounts/{id}` | Deletes account and secret payload |
-| `POST` | `/api/v1/accounts/{id}/reveal` | Decrypt; step-up + audit `CREDENTIAL_REVEAL` |
-| `POST` | `/api/v1/accounts/{id}/rotate-secret` | Replace secret; may change `auth_type` (re-encrypt with new AAD) |
-| `GET` | `/api/v1/audit-events` | Admin list (`limit`/`offset`); filters: `action`, `actor_id`, `outcome` |
-
-## Export / import / DB backup
-
-JSON export is **POST-only** (never GET). Default export is metadata (no secret field) for operator+. Plaintext secret export needs `FEATURE_EXPORT_SECRETS=true`, admin, step-up, and audit `EXPORT_WITH_SECRETS`. Import rejects active hostname conflicts (`409 hostname_conflict`); bodies with secrets require step-up and reseal under the current KEK. Ops DB backups use `scripts/backup.sh` (ciphertext DB only — **never** `master.key`).
-
-| Method | Path | Notes |
-|--------|------|-------|
-| `POST` | `/api/v1/export` | Body `{ "format":"json", "include_secrets": false\|true }` |
-| `POST` | `/api/v1/import` | Portable document; hostname conflict = reject |
-
-```bash
-scripts/backup.sh --db /data/infrawho.db --out /var/backups/infrawho
-scripts/restore.sh --archive /var/backups/infrawho/infrawho-backup-….tar.gz --db /data/infrawho.db
-```
 
 Example first-run (after KEK is in place):
 
