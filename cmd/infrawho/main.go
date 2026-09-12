@@ -14,22 +14,32 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "keys":
-			if err := runKeys(os.Args[2:]); err != nil {
-				log.Fatalf("keys: %v", err)
-			}
-			return
-		case "serve":
-			runServe()
-			return
-		case "help", "-h", "--help":
-			printRootUsage()
-			return
-		}
+	if err := dispatch(os.Args[1:]); err != nil {
+		log.Fatal(err)
 	}
-	runServe()
+}
+
+func dispatch(args []string) error {
+	if len(args) == 0 {
+		runServe()
+		return nil
+	}
+	switch args[0] {
+	case "keys":
+		if err := runKeys(args[1:]); err != nil {
+			return fmt.Errorf("keys: %w", err)
+		}
+		return nil
+	case "serve":
+		runServe()
+		return nil
+	case "help", "-h", "--help":
+		printRootUsage()
+		return nil
+	default:
+		printRootUsage()
+		return fmt.Errorf("unknown command %q (use bare infrawho or 'serve' to start HTTP)", args[0])
+	}
 }
 
 func printRootUsage() {

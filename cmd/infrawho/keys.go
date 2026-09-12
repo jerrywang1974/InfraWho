@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
+	"crypto/subtle"
 	"database/sql"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jerrywang1974/InfraWho/internal/config"
@@ -79,6 +82,9 @@ func runKeysRewrap(args []string) error {
 	if *fromVer == *toVer {
 		return fmt.Errorf("--from and --to must differ")
 	}
+	if filepath.Clean(*oldKeyFile) == filepath.Clean(*newKeyFile) {
+		return fmt.Errorf("--old-key-file and --new-key-file must be different paths")
+	}
 
 	fromKEK, err := config.LoadMasterKey(*oldKeyFile)
 	if err != nil {
@@ -88,10 +94,17 @@ func runKeysRewrap(args []string) error {
 	if err != nil {
 		return fmt.Errorf("new key: %w", err)
 	}
+	if subtle.ConstantTimeCompare(fromKEK, toKEK) == 1 {
+		return fmt.Errorf("old and new KEK material are identical; refuse to rewrap under the same key")
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+	dbPath, err := db.SQLitePath(cfg.DBURL)
+	if err != nil {
+		return fmt.Errorf("db url: %w", err)
 	}
 	sqlDB, err := db.Open(cfg.DBURL)
 	if err != nil {
@@ -111,8 +124,13 @@ func runKeysRewrap(args []string) error {
 		return fmt.Errorf("count remaining: %w", err)
 	}
 
-	fmt.Printf("rewrap complete: updated=%d remaining_from=%d from=%s to=%s\n",
-		updated, remaining, *fromVer, *toVer)
+	if updated == 0 {
+		fmt.Fprintf(os.Stderr, "note: no rows with key_version=%s; verify INFRAWHO_DB_URL (%s) and --from\n",
+			*fromVer, cfg.DBURL)
+	}
+
+	fmt.Printf("rewrap complete: updated=%d remaining_from=%d from=%s to=%s db=%s path=%s\n",
+		updated, remaining, *fromVer, *toVer, cfg.DBURL, dbPath)
 	if remaining != 0 {
 		return fmt.Errorf("%d rows still on %s; fix errors and re-run (keep both key files)", remaining, *fromVer)
 	}
@@ -134,20 +152,30 @@ func rewrapSecretPayloads(sqlDB *sql.DB, fromVer, toVer string, fromKEK, toKEK [
 }
 
 func rewrapBatch(sqlDB *sql.DB, fromVer, toVer string, fromKEK, toKEK []byte, limit int) (int, error) {
-	tx, err := sqlDB.Begin()
+	ctx := context.Background()
+	conn, err := sqlDB.Conn(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("begin: %w", err)
+		return 0, fmt.Errorf("conn: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer conn.Close()
 
-	rows, err := tx.Query(
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return 0, wrapBusy(fmt.Errorf("begin immediate: %w", err))
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+
+	rows, err := conn.QueryContext(ctx,
 		`SELECT account_id, wrapped_dek FROM secret_payloads WHERE key_version = ? LIMIT ?`,
 		fromVer, limit,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("select: %w", err)
+		return 0, wrapBusy(fmt.Errorf("select: %w", err))
 	}
-	defer rows.Close()
 
 	type item struct {
 		accountID  string
@@ -157,28 +185,26 @@ func rewrapBatch(sqlDB *sql.DB, fromVer, toVer string, fromKEK, toKEK []byte, li
 	for rows.Next() {
 		var it item
 		if err := rows.Scan(&it.accountID, &it.wrappedDEK); err != nil {
+			_ = rows.Close()
 			return 0, fmt.Errorf("scan: %w", err)
 		}
 		batch = append(batch, it)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return 0, fmt.Errorf("rows: %w", err)
 	}
-	_ = rows.Close()
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close rows: %w", err)
+	}
 
 	if len(batch) == 0 {
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return 0, wrapBusy(fmt.Errorf("commit: %w", err))
+		}
+		committed = true
 		return 0, nil
 	}
-
-	stmt, err := tx.Prepare(
-		`UPDATE secret_payloads
-		 SET wrapped_dek = ?, key_version = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		 WHERE account_id = ? AND key_version = ?`,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("prepare: %w", err)
-	}
-	defer stmt.Close()
 
 	updated := 0
 	for _, it := range batch {
@@ -186,16 +212,33 @@ func rewrapBatch(sqlDB *sql.DB, fromVer, toVer string, fromKEK, toKEK []byte, li
 		if err != nil {
 			return updated, fmt.Errorf("rewrap account_id=%s: %w", it.accountID, err)
 		}
-		res, err := stmt.Exec(newWrapped, toVer, it.accountID, fromVer)
+		res, err := conn.ExecContext(ctx,
+			`UPDATE secret_payloads
+			 SET wrapped_dek = ?, key_version = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+			 WHERE account_id = ? AND key_version = ?`,
+			newWrapped, toVer, it.accountID, fromVer,
+		)
 		if err != nil {
-			return updated, fmt.Errorf("update account_id=%s: %w", it.accountID, err)
+			return updated, wrapBusy(fmt.Errorf("update account_id=%s: %w", it.accountID, err))
 		}
 		n, _ := res.RowsAffected()
 		updated += int(n)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return 0, wrapBusy(fmt.Errorf("commit: %w", err))
 	}
+	committed = true
 	return updated, nil
+}
+
+func wrapBusy(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "busy") || strings.Contains(msg, "locked") {
+		return fmt.Errorf("%w (stop the HTTP service and re-run)", err)
+	}
+	return err
 }

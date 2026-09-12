@@ -9,12 +9,9 @@ import (
 )
 
 const (
-	// NonceSize is the AES-GCM nonce length (96-bit).
-	NonceSize = 12
-	// DEKSize is the data-encryption key length (AES-256).
-	DEKSize = 32
-	// TagSize is the AES-GCM authentication tag length.
-	TagSize = 16
+	NonceSize = 12 // AES-GCM nonce (96-bit)
+	DEKSize   = 32 // AES-256 key
+	TagSize   = 16 // AES-GCM tag
 )
 
 // Envelope holds sealed secret material for secret_payloads.
@@ -102,8 +99,7 @@ func Open(env *Envelope, accountID, authType string, kek []byte) ([]byte, error)
 	return plain, nil
 }
 
-// RewrapDEK unwraps wrappedDEK with fromKEK and wraps it with toKEK.
-// Payload nonce/ciphertext are unchanged by callers of this function.
+// RewrapDEK returns a new wrapped_dek blob under toKEK.
 func RewrapDEK(wrappedDEK, fromKEK, toKEK []byte) ([]byte, error) {
 	if err := checkKEK(fromKEK); err != nil {
 		return nil, fmt.Errorf("from KEK: %w", err)

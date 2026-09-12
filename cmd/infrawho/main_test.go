@@ -13,6 +13,21 @@ import (
 	"github.com/jerrywang1974/InfraWho/internal/db"
 )
 
+func TestDispatchRejectsUnknownCommand(t *testing.T) {
+	err := dispatch([]string{"rewrap"})
+	if err == nil {
+		t.Fatal("expected error for unknown root command")
+	}
+	if !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("err = %v", err)
+	}
+
+	err = dispatch([]string{"key", "rewrap"})
+	if err == nil {
+		t.Fatal("expected error for typo root command")
+	}
+}
+
 func TestReadyzRequiresDBThenKEK(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "master.key")

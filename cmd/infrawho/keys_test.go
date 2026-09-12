@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jerrywang1974/InfraWho/internal/db"
@@ -176,6 +177,55 @@ func TestRunKeysRewrapCLI(t *testing.T) {
 	}
 	if string(got) != "cli-secret" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestRunKeysRewrapRejectsSameKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "same.key")
+	if err := os.WriteFile(keyPath, bytes.Repeat([]byte{0x55}, vault.DEKSize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("INFRAWHO_DB_URL", "sqlite:///"+filepath.Join(dir, "unused.db"))
+
+	err := runKeysRewrap([]string{
+		"--from", "kek-v1",
+		"--to", "kek-v2",
+		"--old-key-file", keyPath,
+		"--new-key-file", keyPath,
+	})
+	if err == nil {
+		t.Fatal("expected error for identical key file paths")
+	}
+	if !strings.Contains(err.Error(), "different paths") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRunKeysRewrapRejectsIdenticalKeyMaterial(t *testing.T) {
+	dir := t.TempDir()
+	oldKey := filepath.Join(dir, "old.key")
+	newKey := filepath.Join(dir, "new.key")
+	same := bytes.Repeat([]byte{0x66}, vault.DEKSize)
+	if err := os.WriteFile(oldKey, same, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newKey, same, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("INFRAWHO_DB_URL", "sqlite:///"+filepath.Join(dir, "unused.db"))
+
+	err := runKeysRewrap([]string{
+		"--from", "kek-v1",
+		"--to", "kek-v2",
+		"--old-key-file", oldKey,
+		"--new-key-file", newKey,
+	})
+	if err == nil {
+		t.Fatal("expected error for identical KEK material")
+	}
+	if !strings.Contains(err.Error(), "identical") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
