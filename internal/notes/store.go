@@ -66,9 +66,13 @@ func scanNote(row interface {
 
 const noteColumns = `id, asset_id, title, body, author_id, created_at, updated_at`
 
-func (s *Store) assetWritable(assetID string) error {
+type queryRower interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func assetWritable(q queryRower, assetID string) error {
 	var deleted sql.NullString
-	err := s.db.QueryRow(`SELECT deleted_at FROM assets WHERE id = ?`, assetID).Scan(&deleted)
+	err := q.QueryRow(`SELECT deleted_at FROM assets WHERE id = ?`, assetID).Scan(&deleted)
 	if err == sql.ErrNoRows {
 		return ErrAssetNotFound
 	}
@@ -125,10 +129,8 @@ func (s *Store) List(assetID string, limit, offset int) ([]Note, int, error) {
 }
 
 // Create inserts a note under a non-deleted asset.
+// INSERT…SELECT ties the soft-delete check to the insert so a concurrent soft-delete cannot race.
 func (s *Store) Create(assetID string, in *createRequest, authorID *string, now time.Time) (*Note, error) {
-	if err := s.assetWritable(assetID); err != nil {
-		return nil, err
-	}
 	id, err := newID()
 	if err != nil {
 		return nil, err
@@ -138,12 +140,34 @@ func (s *Store) Create(assetID string, in *createRequest, authorID *string, now 
 	if authorID != nil && *authorID != "" {
 		author = *authorID
 	}
-	_, err = s.db.Exec(
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.Exec(
 		`INSERT INTO asset_notes (id, asset_id, title, body, author_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, assetID, in.Title, in.Body, author, ts, ts,
+		 SELECT ?, a.id, ?, ?, ?, ?, ?
+		 FROM assets a
+		 WHERE a.id = ? AND a.deleted_at IS NULL`,
+		id, in.Title, in.Body, author, ts, ts, assetID,
 	)
 	if err != nil {
+		return nil, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		if err := assetWritable(tx, assetID); err != nil {
+			return nil, err
+		}
+		return nil, ErrAssetNotFound
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return s.Get(id)
@@ -162,12 +186,26 @@ func (s *Store) Get(id string) (*Note, error) {
 	return n, nil
 }
 
-// Update applies a PATCH to an existing note.
+// Update applies a PATCH to an existing note on a non-deleted asset.
 func (s *Store) Update(id string, in *patchRequest, now time.Time) (*Note, error) {
-	cur, err := s.Get(id)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRow(`SELECT `+noteColumns+` FROM asset_notes WHERE id = ?`, id)
+	cur, err := scanNote(row)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := assetWritable(tx, cur.AssetID); err != nil {
+		return nil, err
+	}
+
 	if in.Title != nil {
 		cur.Title = *in.Title
 	}
@@ -175,7 +213,7 @@ func (s *Store) Update(id string, in *patchRequest, now time.Time) (*Note, error
 		cur.Body = *in.Body
 	}
 	ts := formatTime(now)
-	res, err := s.db.Exec(
+	res, err := tx.Exec(
 		`UPDATE asset_notes SET title = ?, body = ?, updated_at = ? WHERE id = ?`,
 		cur.Title, cur.Body, ts, id,
 	)
@@ -189,12 +227,32 @@ func (s *Store) Update(id string, in *patchRequest, now time.Time) (*Note, error
 	if n == 0 {
 		return nil, ErrNotFound
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return s.Get(id)
 }
 
-// Delete removes a note by id.
+// Delete removes a note by id when its parent asset is not soft-deleted.
 func (s *Store) Delete(id string) error {
-	res, err := s.db.Exec(`DELETE FROM asset_notes WHERE id = ?`, id)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var assetID string
+	err = tx.QueryRow(`SELECT asset_id FROM asset_notes WHERE id = ?`, id).Scan(&assetID)
+	if err == sql.ErrNoRows {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := assetWritable(tx, assetID); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM asset_notes WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -205,5 +263,5 @@ func (s *Store) Delete(id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }

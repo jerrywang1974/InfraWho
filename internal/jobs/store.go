@@ -69,9 +69,13 @@ func scanJob(row interface {
 const jobColumns = `id, asset_id, name, scheduler_type, schedule_expr, command_or_path,
 	description, enabled_doc, created_at, updated_at`
 
-func (s *Store) assetWritable(assetID string) error {
+type queryRower interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func assetWritable(q queryRower, assetID string) error {
 	var deleted sql.NullString
-	err := s.db.QueryRow(`SELECT deleted_at FROM assets WHERE id = ?`, assetID).Scan(&deleted)
+	err := q.QueryRow(`SELECT deleted_at FROM assets WHERE id = ?`, assetID).Scan(&deleted)
 	if err == sql.ErrNoRows {
 		return ErrAssetNotFound
 	}
@@ -128,10 +132,8 @@ func (s *Store) List(assetID string, limit, offset int) ([]Job, int, error) {
 }
 
 // Create inserts a job under a non-deleted asset.
+// INSERT…SELECT ties the soft-delete check to the insert so a concurrent soft-delete cannot race.
 func (s *Store) Create(assetID string, in *createRequest, now time.Time) (*Job, error) {
-	if err := s.assetWritable(assetID); err != nil {
-		return nil, err
-	}
 	id, err := newID()
 	if err != nil {
 		return nil, err
@@ -141,15 +143,38 @@ func (s *Store) Create(assetID string, in *createRequest, now time.Time) (*Job, 
 	if in.EnabledDoc != nil && *in.EnabledDoc {
 		enabled = 1
 	}
-	_, err = s.db.Exec(
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.Exec(
 		`INSERT INTO scheduled_jobs (
 			id, asset_id, name, scheduler_type, schedule_expr, command_or_path,
 			description, enabled_doc, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, assetID, in.Name, in.SchedulerType, in.ScheduleExpr, in.CommandOrPath,
-		in.Description, enabled, ts, ts,
+		)
+		SELECT ?, a.id, ?, ?, ?, ?, ?, ?, ?, ?
+		FROM assets a
+		WHERE a.id = ? AND a.deleted_at IS NULL`,
+		id, in.Name, in.SchedulerType, in.ScheduleExpr, in.CommandOrPath,
+		in.Description, enabled, ts, ts, assetID,
 	)
 	if err != nil {
+		return nil, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		if err := assetWritable(tx, assetID); err != nil {
+			return nil, err
+		}
+		return nil, ErrAssetNotFound
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return s.Get(id)
@@ -168,12 +193,26 @@ func (s *Store) Get(id string) (*Job, error) {
 	return j, nil
 }
 
-// Update applies a PATCH to an existing job.
+// Update applies a PATCH to an existing job on a non-deleted asset.
 func (s *Store) Update(id string, in *patchRequest, now time.Time) (*Job, error) {
-	cur, err := s.Get(id)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRow(`SELECT `+jobColumns+` FROM scheduled_jobs WHERE id = ?`, id)
+	cur, err := scanJob(row)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := assetWritable(tx, cur.AssetID); err != nil {
+		return nil, err
+	}
+
 	if in.Name != nil {
 		cur.Name = *in.Name
 	}
@@ -197,7 +236,7 @@ func (s *Store) Update(id string, in *patchRequest, now time.Time) (*Job, error)
 		enabled = 1
 	}
 	ts := formatTime(now)
-	res, err := s.db.Exec(
+	res, err := tx.Exec(
 		`UPDATE scheduled_jobs SET
 			name = ?, scheduler_type = ?, schedule_expr = ?, command_or_path = ?,
 			description = ?, enabled_doc = ?, updated_at = ?
@@ -215,12 +254,32 @@ func (s *Store) Update(id string, in *patchRequest, now time.Time) (*Job, error)
 	if n == 0 {
 		return nil, ErrNotFound
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return s.Get(id)
 }
 
-// Delete removes a job by id.
+// Delete removes a job by id when its parent asset is not soft-deleted.
 func (s *Store) Delete(id string) error {
-	res, err := s.db.Exec(`DELETE FROM scheduled_jobs WHERE id = ?`, id)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var assetID string
+	err = tx.QueryRow(`SELECT asset_id FROM scheduled_jobs WHERE id = ?`, id).Scan(&assetID)
+	if err == sql.ErrNoRows {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := assetWritable(tx, assetID); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM scheduled_jobs WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -231,5 +290,5 @@ func (s *Store) Delete(id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }

@@ -1,6 +1,7 @@
 package jobs_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -15,7 +16,7 @@ import (
 	"github.com/jerrywang1974/InfraWho/internal/ratelimit"
 )
 
-func testServer(t *testing.T) http.Handler {
+func testServer(t *testing.T) (http.Handler, *auth.Store, *sql.DB) {
 	t.Helper()
 	sqlDB, err := db.Open("sqlite::memory:")
 	if err != nil {
@@ -23,16 +24,18 @@ func testServer(t *testing.T) http.Handler {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
-	ah := auth.NewHandler(auth.NewStore(sqlDB), ratelimit.New(), auth.Options{
+	store := auth.NewStore(sqlDB)
+	ah := auth.NewHandler(store, ratelimit.New(), auth.Options{
 		CookieSecure:   false,
 		MasterKeyReady: func() bool { return true },
 	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/setup/bootstrap", ah.Bootstrap)
+	mux.HandleFunc("/api/v1/auth/login", ah.Login)
 	mux.HandleFunc("/api/v1/auth/step-up", ah.StepUp)
 	assets.NewHandler(assets.NewStore(sqlDB), assets.Options{}).Register(mux, ah.RequireOrigin)
 	jobs.NewHandler(jobs.NewStore(sqlDB)).Register(mux, ah.RequireOrigin)
-	return ah.Middleware(mux)
+	return ah.Middleware(mux), store, sqlDB
 }
 
 func withOrigin(r *http.Request) *http.Request {
@@ -134,7 +137,7 @@ func createAsset(t *testing.T, srv http.Handler, tok, hostname string) string {
 }
 
 func TestJobCRUDAndPagination(t *testing.T) {
-	srv := testServer(t)
+	srv, _, _ := testServer(t)
 	tok := bootstrap(t, srv)
 	assetID := createAsset(t, srv, tok, "jobs-1.example")
 
@@ -198,7 +201,7 @@ func TestJobCRUDAndPagination(t *testing.T) {
 }
 
 func TestJobEmptyPatchAndValidation(t *testing.T) {
-	srv := testServer(t)
+	srv, _, _ := testServer(t)
 	tok := bootstrap(t, srv)
 	assetID := createAsset(t, srv, tok, "jobs-val.example")
 
@@ -231,12 +234,22 @@ func TestJobEmptyPatchAndValidation(t *testing.T) {
 	}
 }
 
-func TestJobSoftDeletedAssetRejectsCreate(t *testing.T) {
-	srv := testServer(t)
+func TestJobSoftDeletedAssetRejectsWrites(t *testing.T) {
+	srv, _, _ := testServer(t)
 	tok := bootstrap(t, srv)
 	assetID := createAsset(t, srv, tok, "jobs-retired.example")
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets/"+assetID+"/jobs", tok,
+		`{"name":"keep","scheduler_type":"cron"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create before soft-delete: %d %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&created)
+	jobID, _ := created["id"].(string)
+
 	stepUp(t, srv, tok)
-	rec := doJSON(t, srv, http.MethodDelete, "/api/v1/assets/"+assetID, tok, "")
+	rec = doJSON(t, srv, http.MethodDelete, "/api/v1/assets/"+assetID, tok, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("soft-delete: %d %s", rec.Code, rec.Body.String())
 	}
@@ -246,10 +259,18 @@ func TestJobSoftDeletedAssetRejectsCreate(t *testing.T) {
 	if rec.Code != http.StatusConflict || errorCode(rec.Body) != "conflict" {
 		t.Fatalf("create on deleted: %d %s", rec.Code, rec.Body.String())
 	}
+	rec = doJSON(t, srv, http.MethodPatch, "/api/v1/jobs/"+jobID, tok, `{"description":"nope"}`)
+	if rec.Code != http.StatusConflict || errorCode(rec.Body) != "conflict" {
+		t.Fatalf("patch on deleted: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, srv, http.MethodDelete, "/api/v1/jobs/"+jobID, tok, "")
+	if rec.Code != http.StatusConflict || errorCode(rec.Body) != "conflict" {
+		t.Fatalf("delete on deleted: %d %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestJobMissingAsset(t *testing.T) {
-	srv := testServer(t)
+	srv, _, _ := testServer(t)
 	tok := bootstrap(t, srv)
 	missing := "01a0932e-0000-7000-8000-ffffffffffff"
 	rec := doJSON(t, srv, http.MethodGet, "/api/v1/assets/"+missing+"/jobs", tok, "")
@@ -263,10 +284,85 @@ func TestJobMissingAsset(t *testing.T) {
 	}
 }
 
+func TestJobAuthzAndOrigin(t *testing.T) {
+	srv, store, _ := testServer(t)
+	adminTok := bootstrap(t, srv)
+	assetID := createAsset(t, srv, adminTok, "jobs-authz.example")
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets/"+assetID+"/jobs", adminTok,
+		`{"name":"owned","scheduler_type":"cron"}`)
+	var created map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&created)
+	jobID, _ := created["id"].(string)
+
+	hash, err := auth.HashPassword("password1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateUser("viewer1", "Viewer", auth.RoleViewer, hash); err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/auth/login", "",
+		`{"username":"viewer1","password":"password1"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("viewer login: %d %s", rec.Code, rec.Body.String())
+	}
+	viewerTok := cookieValue(rec, auth.SessionCookieName)
+
+	rec = doJSON(t, srv, http.MethodGet, "/api/v1/assets/"+assetID+"/jobs", viewerTok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("viewer list: %d %s", rec.Code, rec.Body.String())
+	}
+	for _, tc := range []struct {
+		method, path, body string
+	}{
+		{http.MethodPost, "/api/v1/assets/" + assetID + "/jobs", `{"name":"x","scheduler_type":"other"}`},
+		{http.MethodPatch, "/api/v1/jobs/" + jobID, `{"description":"x"}`},
+		{http.MethodDelete, "/api/v1/jobs/" + jobID, ""},
+	} {
+		rec = doJSON(t, srv, tc.method, tc.path, viewerTok, tc.body)
+		if rec.Code != http.StatusForbidden || errorCode(rec.Body) != "forbidden" {
+			t.Fatalf("viewer %s: %d %s", tc.method, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/assets/"+assetID+"/jobs",
+		strings.NewReader(`{"name":"no-origin","scheduler_type":"cron"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Host = "example.test"
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: adminTok})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || errorCode(rec.Body) != "forbidden" {
+		t.Fatalf("create without origin: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestJobRequiresAuth(t *testing.T) {
-	srv := testServer(t)
+	srv, _, _ := testServer(t)
 	rec := doJSON(t, srv, http.MethodGet, "/api/v1/assets/x/jobs", "", "")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauth list: %d", rec.Code)
+	}
+}
+
+func TestJobListPaginationDefaults(t *testing.T) {
+	srv, _, _ := testServer(t)
+	tok := bootstrap(t, srv)
+	assetID := createAsset(t, srv, tok, "jobs-page.example")
+
+	rec := doJSON(t, srv, http.MethodGet, "/api/v1/assets/"+assetID+"/jobs", tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var list map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&list)
+	if int(list["limit"].(float64)) != 50 {
+		t.Fatalf("default limit: %#v", list["limit"])
+	}
+
+	rec = doJSON(t, srv, http.MethodGet, "/api/v1/assets/"+assetID+"/jobs?limit=999", tok, "")
+	_ = json.NewDecoder(rec.Body).Decode(&list)
+	if int(list["limit"].(float64)) != 200 {
+		t.Fatalf("max clamp: %#v", list["limit"])
 	}
 }

@@ -163,11 +163,16 @@ func (h *Handler) Patch(w http.ResponseWriter, r *http.Request) {
 
 	n, err := h.store.Update(id, &req, time.Now().UTC())
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+		switch {
+		case errors.Is(err, ErrNotFound):
 			writeError(w, http.StatusNotFound, "not_found", "Note not found")
-			return
+		case errors.Is(err, ErrAssetDeleted):
+			writeError(w, http.StatusConflict, "conflict", "Asset is soft-deleted")
+		case errors.Is(err, ErrAssetNotFound):
+			writeError(w, http.StatusNotFound, "not_found", "Asset not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", "Could not update note")
 		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Could not update note")
 		return
 	}
 	writeJSON(w, http.StatusOK, n)
@@ -180,11 +185,16 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.store.Delete(id); err != nil {
-		if errors.Is(err, ErrNotFound) {
+		switch {
+		case errors.Is(err, ErrNotFound):
 			writeError(w, http.StatusNotFound, "not_found", "Note not found")
-			return
+		case errors.Is(err, ErrAssetDeleted):
+			writeError(w, http.StatusConflict, "conflict", "Asset is soft-deleted")
+		case errors.Is(err, ErrAssetNotFound):
+			writeError(w, http.StatusNotFound, "not_found", "Asset not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", "Could not delete note")
 		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Could not delete note")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -8,7 +8,7 @@ import (
 
 const (
 	maxNameLen        = 128
-	maxScheduleLen    = 1024
+	maxScheduleLen    = 8 * 1024
 	maxCommandLen     = 8 * 1024
 	maxDescriptionLen = 8 * 1024
 	defaultListLimit  = 50
