@@ -109,6 +109,22 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, sqlDB *sql.DB) {
 	assetHandler := assets.NewHandler(assets.NewStore(sqlDB), assets.Options{TrustProxy: cfg.TrustProxy})
 	assetHandler.Register(api, authHandler.RequireOrigin)
 
+	auditStore := audit.NewStore(sqlDB)
+	audit.NewHandler(auditStore).Register(api)
+
+	masterKeyFile := cfg.MasterKeyFile
+	accountStore := accounts.NewStore(sqlDB, accounts.StoreOptions{
+		KeyVersion: cfg.KeyVersion,
+		LoadKEK: func() ([]byte, error) {
+			return config.LoadMasterKey(masterKeyFile)
+		},
+	})
+	accountHandler := accounts.NewHandler(accountStore, auditStore, accounts.Options{
+		TrustProxy: cfg.TrustProxy,
+		Limiter:    authHandler.Limiter(),
+	})
+	accountHandler.Register(api, authHandler.RequireOrigin)
+
 	jobs.NewHandler(jobs.NewStore(sqlDB)).Register(api, authHandler.RequireOrigin)
 	notes.NewHandler(notes.NewStore(sqlDB)).Register(api, authHandler.RequireOrigin)
 
