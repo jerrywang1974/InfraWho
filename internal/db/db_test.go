@@ -56,7 +56,7 @@ func TestOpenMigratesSchema(t *testing.T) {
 	required := []string{
 		"users", "sessions", "assets", "tags", "asset_tags",
 		"accounts", "secret_payloads", "scheduled_jobs", "asset_notes",
-		"audit_events", "app_settings", "schema_migrations",
+		"audit_events", "app_settings", "schema_migrations", "assets_fts",
 	}
 	for _, table := range required {
 		if !tableExists(t, db, table) {
@@ -68,11 +68,11 @@ func TestOpenMigratesSchema(t *testing.T) {
 	}
 
 	var version int
-	if err := db.QueryRow(`SELECT version FROM schema_migrations`).Scan(&version); err != nil {
+	if err := db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatalf("schema_migrations: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("version = %d, want 1", version)
+	if version != 2 {
+		t.Fatalf("version = %d, want 2", version)
 	}
 
 	// Idempotent second open / migrate.

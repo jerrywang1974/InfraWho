@@ -16,6 +16,7 @@ import (
 	"github.com/jerrywang1974/InfraWho/internal/jobs"
 	"github.com/jerrywang1974/InfraWho/internal/notes"
 	"github.com/jerrywang1974/InfraWho/internal/ratelimit"
+	"github.com/jerrywang1974/InfraWho/internal/search"
 )
 
 func main() {
@@ -127,6 +128,7 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, sqlDB *sql.DB) {
 
 	jobs.NewHandler(jobs.NewStore(sqlDB)).Register(api, authHandler.RequireOrigin)
 	notes.NewHandler(notes.NewStore(sqlDB)).Register(api, authHandler.RequireOrigin)
+	search.NewHandler(search.NewStore(sqlDB)).Register(api, authHandler.RequireOrigin)
 
 	mux.Handle("/", authHandler.Middleware(api))
 }

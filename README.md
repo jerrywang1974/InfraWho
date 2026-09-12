@@ -6,7 +6,7 @@ Self-hosted CMDB and credential vault for small infra teams (Phase 1).
 
 ## Status
 
-Auth + assets API: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, asset CRUD (soft-delete / purge), `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Web UI Phase 1 shell (login, setup wizard, asset list/detail) lives under [`web/`](web/). Vault accounts/jobs UI panels come in a later PR.
+Auth + assets + vault: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, asset CRUD (soft-delete / purge), credential vault crypto (`internal/vault`), `infrawho keys rewrap` CLI, `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Accounts reveal, jobs/notes APIs included; search and UI panels come in later PRs.
 
 ## Requirements
 
@@ -112,22 +112,6 @@ Compose bind-mounts `./lab-master.key` to `/etc/infrawho/master.key` and stores 
 | `GET /healthz` | Liveness — always `200` if the process is up. |
 | `GET /readyz` | Readiness — `200` when the DB pings and `INFRAWHO_MASTER_KEY_FILE` loads; otherwise `503`. |
 
-## Web UI (lab)
-
-React + Vite SPA in [`web/`](web/). UI strings are Traditional Chinese.
-
-```bash
-# API (cookie Secure off for plain HTTP lab)
-export INFRAWHO_COOKIE_SECURE=false
-# …plus DB URL / master key / listen addr as above…
-go run ./cmd/infrawho
-
-# SPA (proxies /api to :8080; Host stays localhost:5173 so Origin checks match)
-cd web && npm install && npm run dev
-```
-
-`INFRAWHO_TRUSTED_ORIGINS` is optional for the default Vite lab proxy (`changeOrigin: false`). See [`web/README.md`](web/README.md). Production embedding of `web/dist` from Go is deferred.
-
 ## Auth & first-run setup
 
 Session cookie `infrawho_session`: `HttpOnly; SameSite=Strict; Path=/` (and `Secure` when `INFRAWHO_COOKIE_SECURE=true`). Idle 30m / absolute 12h. State-changing requests require a matching `Origin` or `Referer`.
@@ -148,12 +132,33 @@ Pagination uses `limit` (default 50, max 200) + `offset` (default 0). Soft-delet
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/v1/assets` | List; filters: `q`, `tag`, `environment`, `status`, `include_deleted` |
+| `GET` | `/api/v1/assets` | List; filters: `q` (SQLite FTS5), `tag`, `environment`, `status`, `include_deleted` |
 | `POST` | `/api/v1/assets` | Create (operator+); body may include `tags` |
 | `GET` | `/api/v1/assets/{id}` | Detail + accounts/jobs/notes summaries (no secrets) |
 | `PATCH` | `/api/v1/assets/{id}` | Update metadata; rejects `deleted_at` / `status=retired` (422) |
 | `DELETE` | `/api/v1/assets/{id}` | Soft-delete (`status=retired`, `deleted_at=now`); admin + step-up |
 | `POST` | `/api/v1/assets/{id}/purge` | Hard-delete soft-deleted asset and cascaded rows; admin + step-up (409 if still active) |
+
+## Search (FTS5)
+
+`q` on asset list and `GET /api/v1/search` use SQLite FTS5. Indexed fields: asset `name`/`hostname`/`purpose`/`os_detail`/`location`/`primary_ip`/`config_notes`, tags, account **usernames**, job name+description, note **titles**. **Secrets are never indexed** (nor account descriptions / note bodies). Empty `q` on `/search` returns zero hits. Optional bench: `./scripts/bench_search.sh`.
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `GET` | `/api/v1/search` | Ranked asset hits; filters: `q`, `tag`, `environment`, `status`, `include_deleted`, `limit`/`offset` |
+
+## Accounts & vault
+
+Secrets are optional per account. List/detail responses never include ciphertext. Reveal requires **operator+**, valid **step-up**, and is rate-limited (30/session/min). Responses use `Cache-Control: no-store`. When a secret exists, `auth_type` cannot be changed via `PATCH` (use `rotate-secret`).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/api/v1/assets/{id}/accounts` | Create account; optional `secret` (encrypted at rest) |
+| `PATCH` | `/api/v1/accounts/{id}` | Metadata only; rejects `auth_type` change when `has_secret` |
+| `DELETE` | `/api/v1/accounts/{id}` | Deletes account and secret payload |
+| `POST` | `/api/v1/accounts/{id}/reveal` | Decrypt; step-up + audit `CREDENTIAL_REVEAL` |
+| `POST` | `/api/v1/accounts/{id}/rotate-secret` | Replace secret; may change `auth_type` (re-encrypt with new AAD) |
+| `GET` | `/api/v1/audit-events` | Admin list (`limit`/`offset`); filters: `action`, `actor_id`, `outcome` |
 
 ## Scheduled jobs & notes
 

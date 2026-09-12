@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jerrywang1974/InfraWho/internal/search"
 )
 
 const timeLayout = "2006-01-02T15:04:05.000Z"
@@ -680,9 +681,16 @@ func (s *Store) List(f ListFilter) ([]Asset, int, error) {
 		args = append(args, f.Tag)
 	}
 	if q := strings.TrimSpace(f.Q); q != "" {
-		like := "%" + escapeLike(q) + "%"
-		where = append(where, `(a.name LIKE ? ESCAPE '\' OR a.hostname LIKE ? ESCAPE '\' OR a.purpose LIKE ? ESCAPE '\')`)
-		args = append(args, like, like, like)
+		ftsQ, ok := search.BuildFTSQuery(q)
+		if !ok {
+			return []Asset{}, 0, nil
+		}
+		// FTS over non-secret fields; secrets never enter assets_fts.
+		where = append(where, `EXISTS (
+			SELECT 1 FROM assets_fts
+			WHERE assets_fts.asset_id = a.id AND assets_fts MATCH ?
+		)`)
+		args = append(args, ftsQ)
 	}
 
 	whereSQL := strings.Join(where, " AND ")
@@ -770,11 +778,6 @@ func (s *Store) loadTagsForAssets(ids []string) (map[string][]string, error) {
 		out[assetID] = append(out[assetID], name)
 	}
 	return out, rows.Err()
-}
-
-func escapeLike(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-	return r.Replace(s)
 }
 
 // WriteAudit inserts an audit_events row.
