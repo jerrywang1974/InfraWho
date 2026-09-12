@@ -15,6 +15,8 @@ const (
 	EnvCookieSecure   = "INFRAWHO_COOKIE_SECURE"
 	EnvTrustedOrigins = "INFRAWHO_TRUSTED_ORIGINS"
 	EnvTrustProxy     = "INFRAWHO_TRUST_PROXY"
+	// EnvFeatureExportSecrets enables plaintext secret export (K18). Default false.
+	EnvFeatureExportSecrets = "FEATURE_EXPORT_SECRETS"
 
 	DefaultDBURL      = "sqlite:///data/infrawho.db"
 	DefaultListenAddr = ":8080"
@@ -32,18 +34,21 @@ type Config struct {
 	TrustedOrigins []string
 	// TrustProxy enables X-Forwarded-Host / X-Forwarded-For from an upstream reverse proxy.
 	TrustProxy bool
+	// FeatureExportSecrets gates POST /export with include_secrets:true (default false).
+	FeatureExportSecrets bool
 }
 
 // Load reads env. Phase 1: require sqlite: scheme.
 func Load() (*Config, error) {
 	cfg := &Config{
-		DBURL:          getenv(EnvDBURL, DefaultDBURL),
-		MasterKeyFile:  strings.TrimSpace(os.Getenv(EnvMasterKeyFile)),
-		KeyVersion:     getenv(EnvKeyVersion, DefaultKeyVersion),
-		ListenAddr:     getenv(EnvListenAddr, DefaultListenAddr),
-		CookieSecure:   getenvBool(EnvCookieSecure, true),
-		TrustedOrigins: splitCSV(os.Getenv(EnvTrustedOrigins)),
-		TrustProxy:     getenvBool(EnvTrustProxy, false),
+		DBURL:                getenv(EnvDBURL, DefaultDBURL),
+		MasterKeyFile:        strings.TrimSpace(os.Getenv(EnvMasterKeyFile)),
+		KeyVersion:           getenv(EnvKeyVersion, DefaultKeyVersion),
+		ListenAddr:           getenv(EnvListenAddr, DefaultListenAddr),
+		CookieSecure:         getenvBool(EnvCookieSecure, true),
+		TrustedOrigins:       splitCSV(os.Getenv(EnvTrustedOrigins)),
+		TrustProxy:           getenvBool(EnvTrustProxy, false),
+		FeatureExportSecrets: getenvBool(EnvFeatureExportSecrets, false),
 	}
 	if err := validateDBURL(cfg.DBURL); err != nil {
 		return nil, err
