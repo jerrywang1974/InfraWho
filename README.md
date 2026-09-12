@@ -138,6 +138,19 @@ Pagination uses `limit` (default 50, max 200) + `offset` (default 0). Soft-delet
 | `DELETE` | `/api/v1/assets/{id}` | Soft-delete (`status=retired`, `deleted_at=now`); admin + step-up |
 | `POST` | `/api/v1/assets/{id}/purge` | Hard-delete soft-deleted asset and cascaded rows; admin + step-up (409 if still active) |
 
+## Accounts & vault
+
+Secrets are optional per account. List/detail responses never include ciphertext. Reveal requires **operator+**, valid **step-up**, and is rate-limited (30/session/min). Responses use `Cache-Control: no-store`. When a secret exists, `auth_type` cannot be changed via `PATCH` (use `rotate-secret`).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `POST` | `/api/v1/assets/{id}/accounts` | Create account; optional `secret` (encrypted at rest) |
+| `PATCH` | `/api/v1/accounts/{id}` | Metadata only; rejects `auth_type` change when `has_secret` |
+| `DELETE` | `/api/v1/accounts/{id}` | Deletes account and secret payload |
+| `POST` | `/api/v1/accounts/{id}/reveal` | Decrypt; step-up + audit `CREDENTIAL_REVEAL` |
+| `POST` | `/api/v1/accounts/{id}/rotate-secret` | Replace secret; may change `auth_type` (re-encrypt with new AAD) |
+| `GET` | `/api/v1/audit-events` | Admin list (`limit`/`offset`); filters: `action`, `actor_id`, `outcome` |
+
 Example first-run (after KEK is in place):
 
 ```bash

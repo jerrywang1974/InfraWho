@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/jerrywang1974/InfraWho/internal/accounts"
 	"github.com/jerrywang1974/InfraWho/internal/assets"
+	"github.com/jerrywang1974/InfraWho/internal/audit"
 	"github.com/jerrywang1974/InfraWho/internal/auth"
 	"github.com/jerrywang1974/InfraWho/internal/config"
 	"github.com/jerrywang1974/InfraWho/internal/db"
@@ -104,6 +106,23 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, sqlDB *sql.DB) {
 
 	assetHandler := assets.NewHandler(assets.NewStore(sqlDB), assets.Options{TrustProxy: cfg.TrustProxy})
 	assetHandler.Register(api, authHandler.RequireOrigin)
+
+	auditStore := audit.NewStore(sqlDB)
+	auditHandler := audit.NewHandler(auditStore, audit.Options{TrustProxy: cfg.TrustProxy})
+	auditHandler.Register(api)
+
+	masterKeyFile := cfg.MasterKeyFile
+	accountStore := accounts.NewStore(sqlDB, auditStore, accounts.StoreOptions{
+		KeyVersion: "kek-v1",
+		LoadKEK: func() ([]byte, error) {
+			return config.LoadMasterKey(masterKeyFile)
+		},
+	})
+	accountHandler := accounts.NewHandler(accountStore, auditStore, accounts.Options{
+		TrustProxy: cfg.TrustProxy,
+		Limiter:    authHandler.Limiter(),
+	})
+	accountHandler.Register(api, authHandler.RequireOrigin)
 
 	mux.Handle("/", authHandler.Middleware(api))
 }
