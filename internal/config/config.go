@@ -18,6 +18,9 @@ const (
 	// EnvFeatureExportSecrets enables plaintext secret export (K18). Default false.
 	EnvFeatureExportSecrets = "FEATURE_EXPORT_SECRETS"
 	EnvFeatureMetrics       = "INFRAWHO_FEATURE_METRICS"
+	// EnvWebRoot is for single-box lab/verify images (serve Vite dist). Leave
+	// unset in production behind an org reverse proxy (original design).
+	EnvWebRoot = "INFRAWHO_WEB_ROOT"
 
 	DefaultDBURL      = "sqlite:///data/infrawho.db"
 	DefaultListenAddr = ":8080"
@@ -38,6 +41,8 @@ type Config struct {
 	// FeatureExportSecrets gates POST /export with include_secrets:true (default false).
 	FeatureExportSecrets bool
 	FeatureMetrics       bool
+	// WebRoot, when set, serves a built SPA from that directory (lab/verify).
+	WebRoot string
 }
 
 // Load reads env. Phase 1: require sqlite: scheme.
@@ -52,6 +57,7 @@ func Load() (*Config, error) {
 		TrustProxy:           getenvBool(EnvTrustProxy, false),
 		FeatureExportSecrets: getenvBool(EnvFeatureExportSecrets, false),
 		FeatureMetrics:       getenvBool(EnvFeatureMetrics, false),
+		WebRoot:              strings.TrimSpace(os.Getenv(EnvWebRoot)),
 	}
 	if err := validateDBURL(cfg.DBURL); err != nil {
 		return nil, err

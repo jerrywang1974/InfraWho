@@ -20,6 +20,7 @@ import (
 	"github.com/jerrywang1974/InfraWho/internal/ratelimit"
 	"github.com/jerrywang1974/InfraWho/internal/search"
 	"github.com/jerrywang1974/InfraWho/internal/security"
+	"github.com/jerrywang1974/InfraWho/internal/webui"
 )
 
 func main() {
@@ -63,6 +64,7 @@ Environment:
   INFRAWHO_DB_URL            SQLite URL (default sqlite:///data/infrawho.db)
   INFRAWHO_MASTER_KEY_FILE   Path to current KEK file (server readiness)
   INFRAWHO_LISTEN_ADDR       HTTP listen address (default :8080)
+  INFRAWHO_WEB_ROOT          Optional SPA dist dir (lab/verify single-box only)
 
 See: infrawho keys --help for the KEK rotation runbook.
 `)
@@ -149,7 +151,19 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, sqlDB *sql.DB) {
 	}).Register(api, authHandler.RequireOrigin)
 	search.NewHandler(search.NewStore(sqlDB)).Register(api, authHandler.RequireOrigin)
 
-	mux.Handle("/", authHandler.Middleware(api))
+	// Default: API-only (production behind org reverse proxy). When
+	// INFRAWHO_WEB_ROOT is set (Docker verify/lab image), serve the built SPA
+	// for non-/api paths so one container can be smoke-tested in a browser.
+	var inner http.Handler = api
+	if cfg.WebRoot != "" {
+		h, err := webui.WithSPAFallback(cfg.WebRoot, api)
+		if err != nil {
+			log.Fatalf("webui: INFRAWHO_WEB_ROOT=%q: %v", cfg.WebRoot, err)
+		}
+		inner = h
+		log.Printf("serving SPA from %s (lab/verify; unset WEB_ROOT for API-only prod)", cfg.WebRoot)
+	}
+	mux.Handle("/", authHandler.Middleware(inner))
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {

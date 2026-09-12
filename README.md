@@ -97,25 +97,35 @@ curl -sS http://127.0.0.1:8080/healthz   # ok
 curl -sS http://127.0.0.1:8080/readyz    # ok when DB pings and KEK loads
 ```
 
-## Run with Docker Compose
+## Run with Docker（Lab / 單機驗證）
 
-**Create the key file before the first `compose up`.** If `./lab-master.key` is missing, Docker creates a **directory** at that path for the bind mount; `/readyz` will stay `503` until you remove the directory and replace it with a real key file.
+詳見 [`docs/docker-packaging.md`](docs/docker-packaging.md)。**正式環境**請用 [`docker-compose.prod.example.yml`](docker-compose.prod.example.yml)（API-only、宿主 KEK、TLS 在 reverse proxy）——與 Phase 1 原始設計一致。
+
+**Create the key file before the first `compose up`.** If `./lab-master.key` is missing, Docker creates a **directory** at that path for the bind mount; `/readyz` will stay `503` until you remove the directory and replace it with a real key file. Helper script avoids that footgun:
 
 ```bash
-# Required first — do not start Compose without this file
-openssl rand -out lab-master.key 32
-chmod 600 lab-master.key
+./scripts/docker-lab-up.sh              # lab on :8080 (API + SPA in one image)
+./scripts/docker-lab-up.sh --verify     # verify stack on :18080
+./scripts/verify-smoke.sh --base http://127.0.0.1:18080
+```
 
-# If you already hit the footgun:
-#   rm -rf lab-master.key && openssl rand -out lab-master.key 32 && chmod 600 lab-master.key
+Or manually:
 
+```bash
+openssl rand -out lab-master.key 32 && chmod 600 lab-master.key
 docker compose up --build
 curl -sS http://127.0.0.1:8080/readyz   # expect ok
 ```
 
-Compose bind-mounts `./lab-master.key` to `/etc/infrawho/master.key` and stores SQLite under the `infrawho_data` volume.
+Lab/verify images set `INFRAWHO_WEB_ROOT=/app/web` so the Go process serves the Vite SPA for single-box checks. Production example **leaves `WEB_ROOT` unset** (API-only).
 
 The image runs as root by default so lab `0600` key bind-mounts stay readable. For production, prefer `docker run --user` matching the key file owner (or Docker/Podman secrets) — see comments in [`Dockerfile`](Dockerfile). That same UID must also be able to write the SQLite data path (e.g. Compose `/data`); chown the volume once if it was previously written as root. Do not bake a fixed non-root `USER` into the image if lab keys are root-owned.
+
+| Variable | Lab/verify | Production (design) |
+|----------|------------|---------------------|
+| `INFRAWHO_WEB_ROOT` | `/app/web` | unset |
+| `INFRAWHO_COOKIE_SECURE` | `false` | `true` (HTTPS) |
+| KEK mount | `./lab-master.key` | `/etc/infrawho/master.key` |
 
 ## Health endpoints
 
