@@ -13,6 +13,7 @@ const (
 	EnvListenAddr     = "INFRAWHO_LISTEN_ADDR"
 	EnvCookieSecure   = "INFRAWHO_COOKIE_SECURE"
 	EnvTrustedOrigins = "INFRAWHO_TRUSTED_ORIGINS"
+	EnvTrustProxy     = "INFRAWHO_TRUST_PROXY"
 
 	DefaultDBURL      = "sqlite:///data/infrawho.db"
 	DefaultListenAddr = ":8080"
@@ -25,6 +26,8 @@ type Config struct {
 	ListenAddr     string
 	CookieSecure   bool
 	TrustedOrigins []string
+	// TrustProxy enables X-Forwarded-Host / X-Forwarded-For from an upstream reverse proxy.
+	TrustProxy bool
 }
 
 // Load reads env. Phase 1: require sqlite: scheme.
@@ -35,6 +38,7 @@ func Load() (*Config, error) {
 		ListenAddr:     getenv(EnvListenAddr, DefaultListenAddr),
 		CookieSecure:   getenvBool(EnvCookieSecure, true),
 		TrustedOrigins: splitCSV(os.Getenv(EnvTrustedOrigins)),
+		TrustProxy:     getenvBool(EnvTrustProxy, false),
 	}
 	if err := validateDBURL(cfg.DBURL); err != nil {
 		return nil, err

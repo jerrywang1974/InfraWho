@@ -13,6 +13,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv(EnvListenAddr, "")
 	t.Setenv(EnvCookieSecure, "")
 	t.Setenv(EnvTrustedOrigins, "")
+	t.Setenv(EnvTrustProxy, "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -26,6 +27,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if !cfg.CookieSecure {
 		t.Fatal("CookieSecure default should be true")
+	}
+	if cfg.TrustProxy {
+		t.Fatal("TrustProxy default should be false")
 	}
 	if len(cfg.TrustedOrigins) != 0 {
 		t.Fatalf("TrustedOrigins = %v, want empty", cfg.TrustedOrigins)

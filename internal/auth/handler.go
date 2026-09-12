@@ -12,50 +12,86 @@ import (
 )
 
 const (
-	loginIPLimit       = 10
-	loginUserLimit     = 5
-	loginWindow        = time.Minute
-	lockoutThreshold   = 10
-	lockoutDuration    = 15 * time.Minute
-	stepUpSessionLimit = 10
-	stepUpWindow       = time.Minute
-	RevealSessionLimit = 30 // exported for accounts PR
-	RevealWindow       = time.Minute
-	minPasswordLen     = 8
+	defaultLoginIPLimit       = 10
+	defaultLoginUserLimit     = 5
+	loginWindow               = time.Minute
+	defaultLockoutThreshold   = 10
+	lockoutDuration           = 15 * time.Minute
+	defaultStepUpSessionLimit = 10
+	stepUpWindow              = time.Minute
+	RevealSessionLimit        = 30
+	RevealWindow              = time.Minute
+	defaultBootstrapIPLimit   = 5
+	bootstrapWindow           = time.Minute
+	minPasswordLen            = 8
 )
 
 // Handler serves auth and setup HTTP endpoints.
 type Handler struct {
-	store          *Store
-	limiter        *ratelimit.Limiter
-	lockout        *ratelimit.Lockout
-	cookieSecure   bool
-	trustedOrigins []string
-	masterKeyFile  string
-	masterKeyReady func() bool
+	store              *Store
+	limiter            *ratelimit.Limiter
+	lockout            *ratelimit.Lockout
+	cookieSecure       bool
+	trustProxy         bool
+	trustedOrigins     []string
+	masterKeyFile      string
+	masterKeyReady     func() bool
+	loginIPLimit       int
+	loginUserLimit     int
+	lockoutThreshold   int
+	stepUpSessionLimit int
+	bootstrapIPLimit   int
 }
 
 // Options configures the auth handler.
 type Options struct {
 	CookieSecure   bool
+	TrustProxy     bool
 	TrustedOrigins []string
 	MasterKeyFile  string
 	// MasterKeyReady overrides default LoadMasterKey check when non-nil.
 	MasterKeyReady func() bool
+	// Optional limit overrides; zero keeps design defaults (useful in tests).
+	LoginIPLimit       int
+	LoginUserLimit     int
+	LockoutThreshold   int
+	StepUpSessionLimit int
+	BootstrapIPLimit   int
 }
 
 func NewHandler(store *Store, limiter *ratelimit.Limiter, opts Options) *Handler {
 	h := &Handler{
-		store:          store,
-		limiter:        limiter,
-		lockout:        ratelimit.NewLockout(),
-		cookieSecure:   opts.CookieSecure,
-		trustedOrigins: opts.TrustedOrigins,
-		masterKeyFile:  opts.MasterKeyFile,
-		masterKeyReady: opts.MasterKeyReady,
+		store:              store,
+		limiter:            limiter,
+		lockout:            ratelimit.NewLockout(),
+		cookieSecure:       opts.CookieSecure,
+		trustProxy:         opts.TrustProxy,
+		trustedOrigins:     opts.TrustedOrigins,
+		masterKeyFile:      opts.MasterKeyFile,
+		masterKeyReady:     opts.MasterKeyReady,
+		loginIPLimit:       opts.LoginIPLimit,
+		loginUserLimit:     opts.LoginUserLimit,
+		lockoutThreshold:   opts.LockoutThreshold,
+		stepUpSessionLimit: opts.StepUpSessionLimit,
+		bootstrapIPLimit:   opts.BootstrapIPLimit,
 	}
 	if h.limiter == nil {
 		h.limiter = ratelimit.New()
+	}
+	if h.loginIPLimit <= 0 {
+		h.loginIPLimit = defaultLoginIPLimit
+	}
+	if h.loginUserLimit <= 0 {
+		h.loginUserLimit = defaultLoginUserLimit
+	}
+	if h.lockoutThreshold <= 0 {
+		h.lockoutThreshold = defaultLockoutThreshold
+	}
+	if h.stepUpSessionLimit <= 0 {
+		h.stepUpSessionLimit = defaultStepUpSessionLimit
+	}
+	if h.bootstrapIPLimit <= 0 {
+		h.bootstrapIPLimit = defaultBootstrapIPLimit
 	}
 	if h.masterKeyReady == nil {
 		h.masterKeyReady = func() bool {
@@ -69,6 +105,14 @@ func NewHandler(store *Store, limiter *ratelimit.Limiter, opts Options) *Handler
 // Limiter exposes the shared rate limiter (e.g. reveal limits).
 func (h *Handler) Limiter() *ratelimit.Limiter {
 	return h.limiter
+}
+
+func (h *Handler) checkOrigin(r *http.Request) bool {
+	return CheckOrigin(r, h.trustedOrigins, h.trustProxy)
+}
+
+func (h *Handler) ip(r *http.Request) string {
+	return clientIP(r, h.trustProxy)
 }
 
 type loginRequest struct {
@@ -93,13 +137,13 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
 		return
 	}
-	if !CheckOrigin(r, h.trustedOrigins) {
+	if !h.checkOrigin(r) {
 		writeError(w, http.StatusForbidden, "forbidden", "Origin check failed")
 		return
 	}
 
-	ip := clientIP(r)
-	if !h.limiter.Allow("login:ip:"+ip, loginIPLimit, loginWindow) {
+	ip := h.ip(r)
+	if !h.limiter.Allow("login:ip:"+ip, h.loginIPLimit, loginWindow) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts")
 		return
 	}
@@ -116,7 +160,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userKey := strings.ToLower(req.Username)
-	if !h.limiter.Allow("login:user:"+userKey, loginUserLimit, loginWindow) {
+	if !h.limiter.Allow("login:user:"+userKey, h.loginUserLimit, loginWindow) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts")
 		return
 	}
@@ -163,7 +207,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) failLogin(w http.ResponseWriter, r *http.Request, actorID *string, username, ip string) {
 	userKey := strings.ToLower(username)
-	locked := h.lockout.Fail(userKey, lockoutThreshold, lockoutDuration)
+	locked := h.lockout.Fail(userKey, h.lockoutThreshold, lockoutDuration)
 	action := "LOGIN_FAILURE"
 	outcome := "failure"
 	if locked {
@@ -183,11 +227,11 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
 		return
 	}
-	if !CheckOrigin(r, h.trustedOrigins) {
+	if !h.checkOrigin(r) {
 		writeError(w, http.StatusForbidden, "forbidden", "Origin check failed")
 		return
 	}
-	ip := clientIP(r)
+	ip := h.ip(r)
 	if sess, ok := SessionFromContext(r.Context()); ok {
 		_ = h.store.DeleteSession(sess.ID)
 		if u, ok := UserFromContext(r.Context()); ok {
@@ -230,7 +274,7 @@ func (h *Handler) StepUp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
 		return
 	}
-	if !CheckOrigin(r, h.trustedOrigins) {
+	if !h.checkOrigin(r) {
 		writeError(w, http.StatusForbidden, "forbidden", "Origin check failed")
 		return
 	}
@@ -244,7 +288,7 @@ func (h *Handler) StepUp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 		return
 	}
-	if !h.limiter.Allow("stepup:session:"+sess.ID, stepUpSessionLimit, stepUpWindow) {
+	if !h.limiter.Allow("stepup:session:"+sess.ID, h.stepUpSessionLimit, stepUpWindow) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many step-up attempts")
 		return
 	}
@@ -257,7 +301,12 @@ func (h *Handler) StepUp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "validation_error", "Password is required")
 		return
 	}
-	okHash, err := VerifyPassword(u.PasswordHash, req.Password)
+	hash, err := h.store.UserPasswordHash(u.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Could not verify password")
+		return
+	}
+	okHash, err := VerifyPassword(hash, req.Password)
 	if err != nil || !okHash {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Invalid password")
 		return
@@ -269,7 +318,7 @@ func (h *Handler) StepUp(w http.ResponseWriter, r *http.Request) {
 	}
 	uid := u.ID
 	sid := sess.ID
-	_ = h.store.WriteAudit(&uid, "STEP_UP", "session", &sid, "success", clientIP(r), r.UserAgent(), "{}")
+	_ = h.store.WriteAudit(&uid, "STEP_UP", "session", &sid, "success", h.ip(r), r.UserAgent(), "{}")
 	w.WriteHeader(http.StatusNoContent)
 }
 

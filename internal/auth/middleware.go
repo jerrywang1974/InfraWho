@@ -89,7 +89,7 @@ func RequireStepUp(next http.Handler) http.Handler {
 // RequireOrigin rejects state-changing requests that fail Origin/Referer checks.
 func (h *Handler) RequireOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !CheckOrigin(r, h.trustedOrigins) {
+		if !h.checkOrigin(r) {
 			writeError(w, http.StatusForbidden, "forbidden", "Origin check failed")
 			return
 		}

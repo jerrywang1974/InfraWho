@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -56,10 +57,16 @@ func (h *Handler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
 		return
 	}
-	if !CheckOrigin(r, h.trustedOrigins) {
+	if !h.checkOrigin(r) {
 		writeError(w, http.StatusForbidden, "forbidden", "Origin check failed")
 		return
 	}
+	ip := h.ip(r)
+	if !h.limiter.Allow("bootstrap:ip:"+ip, h.bootstrapIPLimit, bootstrapWindow) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Too many setup attempts")
+		return
+	}
+
 	n, err := h.store.UserCount()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Bootstrap failed")
@@ -99,18 +106,18 @@ func (h *Handler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Could not hash password")
 		return
 	}
-	user, err := h.store.CreateUser(req.Username, req.DisplayName, RoleAdmin, hash)
+	now := time.Now().UTC()
+	user, err := h.store.BootstrapAdmin(req.Username, req.DisplayName, hash, now)
 	if err != nil {
+		if errors.Is(err, ErrAlreadyBootstrapped) {
+			writeError(w, http.StatusConflict, "conflict", "Already bootstrapped")
+			return
+		}
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "conflict", "Username already exists")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Could not create admin user")
-		return
-	}
-	now := time.Now().UTC()
-	if err := h.store.SetChecklistComplete(now); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Could not persist checklist")
 		return
 	}
 
@@ -121,7 +128,7 @@ func (h *Handler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	setSessionCookie(w, raw, h.cookieSecure, sess.AbsoluteExpiresAt)
 	uid := user.ID
-	_ = h.store.WriteAudit(&uid, "LOGIN", "system", nil, "success", clientIP(r), r.UserAgent(), `{"bootstrap":true}`)
+	_ = h.store.WriteAudit(&uid, "LOGIN", "system", nil, "success", ip, r.UserAgent(), `{"bootstrap":true}`)
 	writeJSON(w, http.StatusCreated, meResponse{
 		ID:           user.ID,
 		Username:     user.Username,
@@ -136,7 +143,7 @@ func (h *Handler) Acknowledge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
 		return
 	}
-	if !CheckOrigin(r, h.trustedOrigins) {
+	if !h.checkOrigin(r) {
 		writeError(w, http.StatusForbidden, "forbidden", "Origin check failed")
 		return
 	}

@@ -8,7 +8,8 @@ import (
 
 // CheckOrigin validates Origin (or Referer) against the request host and optional allow-list.
 // Safe methods (GET, HEAD, OPTIONS) always pass.
-func CheckOrigin(r *http.Request, trustedOrigins []string) bool {
+// X-Forwarded-Host is honored only when trustProxy is true.
+func CheckOrigin(r *http.Request, trustedOrigins []string, trustProxy bool) bool {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
@@ -29,34 +30,43 @@ func CheckOrigin(r *http.Request, trustedOrigins []string) bool {
 	if err != nil || ou.Scheme == "" || ou.Host == "" {
 		return false
 	}
+	originKey := strings.ToLower(ou.Scheme + "://" + ou.Host)
+	originHost := strings.ToLower(ou.Host)
 
-	allowed := map[string]struct{}{}
-	for _, h := range requestHosts(r) {
-		allowed[strings.ToLower(h)] = struct{}{}
+	allowedHosts := map[string]struct{}{}
+	allowedOrigins := map[string]struct{}{}
+	for _, h := range requestHosts(r, trustProxy) {
+		allowedHosts[strings.ToLower(h)] = struct{}{}
 	}
 	for _, o := range trustedOrigins {
 		o = strings.TrimSpace(o)
 		if o == "" {
 			continue
 		}
-		if u, err := url.Parse(o); err == nil && u.Host != "" {
-			allowed[strings.ToLower(u.Host)] = struct{}{}
+		if u, err := url.Parse(o); err == nil && u.Scheme != "" && u.Host != "" {
+			allowedOrigins[strings.ToLower(u.Scheme+"://"+u.Host)] = struct{}{}
 			continue
 		}
-		allowed[strings.ToLower(o)] = struct{}{}
+		// Bare host entry matches any scheme for that host.
+		allowedHosts[strings.ToLower(o)] = struct{}{}
 	}
 
-	_, ok := allowed[strings.ToLower(ou.Host)]
+	if _, ok := allowedOrigins[originKey]; ok {
+		return true
+	}
+	_, ok := allowedHosts[originHost]
 	return ok
 }
 
-func requestHosts(r *http.Request) []string {
+func requestHosts(r *http.Request, trustProxy bool) []string {
 	var hosts []string
-	if xfh := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); xfh != "" {
-		if i := strings.IndexByte(xfh, ','); i >= 0 {
-			xfh = xfh[:i]
+	if trustProxy {
+		if xfh := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); xfh != "" {
+			if i := strings.IndexByte(xfh, ','); i >= 0 {
+				xfh = xfh[:i]
+			}
+			hosts = append(hosts, strings.TrimSpace(xfh))
 		}
-		hosts = append(hosts, strings.TrimSpace(xfh))
 	}
 	if r.Host != "" {
 		hosts = append(hosts, r.Host)

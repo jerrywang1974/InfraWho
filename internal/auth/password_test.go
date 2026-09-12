@@ -1,14 +1,20 @@
 package auth
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestHashAndVerifyPassword(t *testing.T) {
 	hash, err := HashPassword("correct horse battery")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hash == "" || hash[:10] != "$argon2id$" {
+	if !strings.HasPrefix(hash, "$argon2id$") {
 		t.Fatalf("unexpected hash prefix: %q", hash)
+	}
+	if !strings.Contains(hash, "$m=65536,t=3,p=1$") {
+		t.Fatalf("unexpected argon2 params in hash: %q", hash)
 	}
 	ok, err := VerifyPassword(hash, "correct horse battery")
 	if err != nil || !ok {

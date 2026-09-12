@@ -39,6 +39,7 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, sqlDB *sql.DB) {
 	store := auth.NewStore(sqlDB)
 	authHandler := auth.NewHandler(store, ratelimit.New(), auth.Options{
 		CookieSecure:   cfg.CookieSecure,
+		TrustProxy:     cfg.TrustProxy,
 		TrustedOrigins: cfg.TrustedOrigins,
 		MasterKeyFile:  cfg.MasterKeyFile,
 	})

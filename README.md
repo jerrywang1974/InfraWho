@@ -21,7 +21,8 @@ Auth-capable API skeleton: config loading, SQLite open + auto-migrate, session c
 | `INFRAWHO_MASTER_KEY_FILE` | _(empty)_ | Path to KEK file (32 raw bytes **or** base64 of 32 bytes). Preferred over env-embedded keys. |
 | `INFRAWHO_LISTEN_ADDR` | `:8080` | HTTP listen address. |
 | `INFRAWHO_COOKIE_SECURE` | `true` | Set `false` for plain-HTTP lab (Compose does this). Production behind TLS should keep `true`. |
-| `INFRAWHO_TRUSTED_ORIGINS` | _(empty)_ | Optional comma-separated origins/hosts allowed for state-changing requests (in addition to the request `Host` / `X-Forwarded-Host`). |
+| `INFRAWHO_TRUSTED_ORIGINS` | _(empty)_ | Optional comma-separated origins (`https://app.example`) or bare hosts. Scheme-bearing entries match that scheme only. |
+| `INFRAWHO_TRUST_PROXY` | `false` | When `true`, honor `X-Forwarded-Host` / `X-Forwarded-For` from an upstream reverse proxy. Leave `false` when clients can reach the process directly. |
 
 ### Master key (KEK)
 

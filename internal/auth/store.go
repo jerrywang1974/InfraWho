@@ -1,13 +1,18 @@
 package auth
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// ErrAlreadyBootstrapped is returned when a first-admin create races past an existing user.
+var ErrAlreadyBootstrapped = errors.New("already bootstrapped")
 
 const (
 	timeLayout = "2006-01-02T15:04:05.000Z"
@@ -86,13 +91,21 @@ func (s *Store) FindUserByUsername(username string) (*User, error) {
 	return scanUser(row)
 }
 
+// FindUserByID returns a principal without password_hash (safe for request context).
 func (s *Store) FindUserByID(id string) (*User, error) {
 	row := s.db.QueryRow(
-		`SELECT id, username, display_name, role, password_hash, created_at, updated_at
+		`SELECT id, username, display_name, role, created_at, updated_at
 		 FROM users WHERE id = ?`,
 		id,
 	)
-	return scanUser(row)
+	return scanUserNoHash(row)
+}
+
+// UserPasswordHash loads only the password hash for step-up / credential checks.
+func (s *Store) UserPasswordHash(id string) (string, error) {
+	var hash string
+	err := s.db.QueryRow(`SELECT password_hash FROM users WHERE id = ?`, id).Scan(&hash)
+	return hash, err
 }
 
 type scannable interface {
@@ -115,6 +128,89 @@ func scanUser(row scannable) (*User, error) {
 		return nil, err
 	}
 	return &u, nil
+}
+
+func scanUserNoHash(row scannable) (*User, error) {
+	var u User
+	var role string
+	var created, updated string
+	if err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &role, &created, &updated); err != nil {
+		return nil, err
+	}
+	u.Role = Role(role)
+	var err error
+	if u.CreatedAt, err = parseTime(created); err != nil {
+		return nil, err
+	}
+	if u.UpdatedAt, err = parseTime(updated); err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// BootstrapAdmin creates the first admin and checklist under a SQLite write lock.
+func (s *Store) BootstrapAdmin(username, displayName, passwordHash string, now time.Time) (*User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return nil, fmt.Errorf("username is required")
+	}
+	if displayName == "" {
+		displayName = username
+	}
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+
+	var n int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
+		return nil, err
+	}
+	if n > 0 {
+		return nil, ErrAlreadyBootstrapped
+	}
+
+	ts := formatTime(now)
+	u := &User{
+		ID:           uuid.NewString(),
+		Username:     username,
+		DisplayName:  displayName,
+		Role:         RoleAdmin,
+		PasswordHash: passwordHash,
+	}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO users (id, username, display_name, role, password_hash, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		u.ID, u.Username, u.DisplayName, string(u.Role), u.PasswordHash, ts, ts,
+	); err != nil {
+		return nil, err
+	}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO app_settings (key, value, updated_at) VALUES (?, '1', ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		settingChecklistKey, ts,
+	); err != nil {
+		return nil, err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return nil, err
+	}
+	committed = true
+	u.CreatedAt, _ = parseTime(ts)
+	u.UpdatedAt = u.CreatedAt
+	return u, nil
 }
 
 // CreateSession inserts a session and returns the raw cookie token.
