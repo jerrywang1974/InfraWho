@@ -6,7 +6,7 @@ Self-hosted CMDB and credential vault for small infra teams (Phase 1).
 
 ## Status
 
-Runnable skeleton: config loading, SQLite open + auto-migrate on startup, `/healthz`, `/readyz` (requires DB ping and loadable master key / KEK), Docker Compose. Auth, vault crypto, and UI come in later PRs.
+Auth-capable API skeleton: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Vault crypto and UI come in later PRs.
 
 ## Requirements
 
@@ -20,6 +20,8 @@ Runnable skeleton: config loading, SQLite open + auto-migrate on startup, `/heal
 | `INFRAWHO_DB_URL` | `sqlite:///data/infrawho.db` | Phase 1 **SQLite only**. Non-`sqlite:` schemes fail at startup. Parent dirs are created; embedded migrations run on open. |
 | `INFRAWHO_MASTER_KEY_FILE` | _(empty)_ | Path to KEK file (32 raw bytes **or** base64 of 32 bytes). Preferred over env-embedded keys. |
 | `INFRAWHO_LISTEN_ADDR` | `:8080` | HTTP listen address. |
+| `INFRAWHO_COOKIE_SECURE` | `true` | Set `false` for plain-HTTP lab (Compose does this). Production behind TLS should keep `true`. |
+| `INFRAWHO_TRUSTED_ORIGINS` | _(empty)_ | Optional comma-separated origins/hosts allowed for state-changing requests (in addition to the request `Host` / `X-Forwarded-Host`). |
 
 ### Master key (KEK)
 
@@ -82,3 +84,26 @@ Compose bind-mounts `./lab-master.key` to `/etc/infrawho/master.key` and stores 
 |------|----------|
 | `GET /healthz` | Liveness — always `200` if the process is up. |
 | `GET /readyz` | Readiness — `200` when the DB pings and `INFRAWHO_MASTER_KEY_FILE` loads; otherwise `503`. |
+
+## Auth & first-run setup
+
+Session cookie `infrawho_session`: `HttpOnly; SameSite=Strict; Path=/` (and `Secure` when `INFRAWHO_COOKIE_SECURE=true`). Idle 30m / absolute 12h. State-changing requests require a matching `Origin` or `Referer`.
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `GET` | `/api/v1/setup/status` | Bootstrap / KEK / checklist banner flags |
+| `POST` | `/api/v1/setup/bootstrap` | Create first admin + checklist ack (requires KEK) |
+| `POST` | `/api/v1/setup/acknowledge` | Persist checklist (admin session) |
+| `POST` | `/api/v1/auth/login` | Sets session cookie |
+| `POST` | `/api/v1/auth/logout` | Clears session |
+| `GET` | `/api/v1/auth/me` | Current user + `step_up_active` |
+| `POST` | `/api/v1/auth/step-up` | Re-check password; step-up valid 5m |
+
+Example first-run (after KEK is in place):
+
+```bash
+curl -sS -c /tmp/iw.ck -b /tmp/iw.ck -H 'Origin: http://127.0.0.1:8080' \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"change-me-now","acknowledge_kek_offline":true,"acknowledge_kek_irrecoverable":true,"acknowledge_backup_planned":true}' \
+  http://127.0.0.1:8080/api/v1/setup/bootstrap
+```
