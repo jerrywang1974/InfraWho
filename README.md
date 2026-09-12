@@ -6,7 +6,7 @@ Self-hosted CMDB and credential vault for small infra teams (Phase 1).
 
 ## Status
 
-Runnable skeleton: config loading, `/healthz`, `/readyz` (fails if the master key / KEK cannot be loaded), Docker Compose. Auth, DB schema, vault crypto, and UI come in later PRs.
+Runnable skeleton: config loading, SQLite open + auto-migrate on startup, `/healthz`, `/readyz` (requires DB ping and loadable master key / KEK), Docker Compose. Auth, vault crypto, and UI come in later PRs.
 
 ## Requirements
 
@@ -17,7 +17,7 @@ Runnable skeleton: config loading, `/healthz`, `/readyz` (fails if the master ke
 
 | Variable | Default | Notes |
 |----------|---------|--------|
-| `INFRAWHO_DB_URL` | `sqlite:///data/infrawho.db` | Phase 1 **SQLite only**. Non-`sqlite:` schemes fail at startup. |
+| `INFRAWHO_DB_URL` | `sqlite:///data/infrawho.db` | Phase 1 **SQLite only**. Non-`sqlite:` schemes fail at startup. Parent dirs are created; embedded migrations run on open. |
 | `INFRAWHO_MASTER_KEY_FILE` | _(empty)_ | Path to KEK file (32 raw bytes **or** base64 of 32 bytes). Preferred over env-embedded keys. |
 | `INFRAWHO_LISTEN_ADDR` | `:8080` | HTTP listen address. |
 
@@ -81,4 +81,4 @@ Compose bind-mounts `./lab-master.key` to `/etc/infrawho/master.key` and stores 
 | Path | Behavior |
 |------|----------|
 | `GET /healthz` | Liveness — always `200` if the process is up. |
-| `GET /readyz` | Readiness — `200` only when `INFRAWHO_MASTER_KEY_FILE` is set and the KEK loads; otherwise `503`. |
+| `GET /readyz` | Readiness — `200` when the DB pings and `INFRAWHO_MASTER_KEY_FILE` loads; otherwise `503`. |

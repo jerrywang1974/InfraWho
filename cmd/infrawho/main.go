@@ -1,10 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"log"
 	"net/http"
 
 	"github.com/jerrywang1974/InfraWho/internal/config"
+	"github.com/jerrywang1974/InfraWho/internal/db"
 )
 
 func main() {
@@ -13,9 +15,15 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
+	sqlDB, err := db.Open(cfg.DBURL)
+	if err != nil {
+		log.Fatalf("db: %v", err)
+	}
+	defer sqlDB.Close()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/readyz", handleReadyz(cfg))
+	mux.HandleFunc("/readyz", handleReadyz(cfg, sqlDB))
 
 	log.Printf("infrawho listening on %s", cfg.ListenAddr)
 	if err := http.ListenAndServe(cfg.ListenAddr, mux); err != nil {
@@ -32,10 +40,14 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-func handleReadyz(cfg *config.Config) http.HandlerFunc {
+func handleReadyz(cfg *config.Config, sqlDB *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := sqlDB.Ping(); err != nil {
+			http.Error(w, "not ready: database unavailable\n", http.StatusServiceUnavailable)
 			return
 		}
 		if _, err := config.LoadMasterKey(cfg.MasterKeyFile); err != nil {
