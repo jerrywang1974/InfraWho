@@ -3,7 +3,10 @@ package search
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
+
+const maxFTSTokens = 16
 
 // BuildFTSQuery turns a user q into an FTS5 MATCH expression.
 // Tokens are AND-ed with prefix matching. Returns ok=false when nothing searchable remains.
@@ -22,10 +25,18 @@ func BuildFTSQuery(q string) (fts string, ok bool) {
 
 	var terms []string
 	for _, tok := range strings.Fields(normalized) {
-		if isFTSKeyword(tok) {
+		if utf8.RuneCountInString(tok) < 2 {
 			continue
 		}
-		terms = append(terms, tok+"*")
+		if isFTSKeyword(tok) {
+			// Quote so AND/OR/NOT/NEAR are literals, not operators.
+			terms = append(terms, `"`+tok+`"`)
+		} else {
+			terms = append(terms, tok+"*")
+		}
+		if len(terms) >= maxFTSTokens {
+			break
+		}
 	}
 	if len(terms) == 0 {
 		return "", false

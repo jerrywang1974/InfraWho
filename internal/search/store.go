@@ -124,28 +124,19 @@ func (s *Store) SearchAssets(f Filter) ([]Hit, int, error) {
 	return items, total, rows.Err()
 }
 
-// MatchingAssetIDs returns asset IDs matching q (unordered). ok=false means empty q / no tokens.
-func MatchingAssetIDs(db *sql.DB, q string) (ids []string, ok bool, err error) {
-	ftsQ, ok := BuildFTSQuery(q)
-	if !ok {
-		return nil, false, nil
+// RebuildAssetFTS refreshes one asset's FTS row from assets_fts_src (single rebuild).
+func RebuildAssetFTS(exec interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}, assetID string) error {
+	if _, err := exec.Exec(`DELETE FROM assets_fts WHERE asset_id = ?`, assetID); err != nil {
+		return err
 	}
-	rows, err := db.Query(`SELECT asset_id FROM assets_fts WHERE assets_fts MATCH ?`, ftsQ)
-	if err != nil {
-		return nil, true, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, true, err
-		}
-		ids = append(ids, id)
-	}
-	if ids == nil {
-		ids = []string{}
-	}
-	return ids, true, rows.Err()
+	_, err := exec.Exec(
+		`INSERT INTO assets_fts(asset_id, body)
+		 SELECT asset_id, body FROM assets_fts_src WHERE asset_id = ?`,
+		assetID,
+	)
+	return err
 }
 
 // FTSContainsSecretColumn is a test helper asserting secret_payloads is absent from the FTS source view.

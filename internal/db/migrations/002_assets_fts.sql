@@ -1,7 +1,8 @@
 -- FTS5 asset search index (non-secret fields only).
--- Indexed: asset name/hostname/purpose/os_detail/location/primary_ip/config_notes,
--- tags, account.username, job name+description, note title.
+-- Indexed: asset name/hostname/purpose/os_detail/location/primary_ip/additional_ips/
+-- hypervisor/config_notes, tags, account.username, job name+description, note title.
 -- Secrets (secret_payloads) and note bodies are intentionally excluded.
+-- asset_tags changes are rebuilt once from the app (replaceTagsTx), not per-row triggers.
 
 CREATE VIRTUAL TABLE assets_fts USING fts5(
     asset_id UNINDEXED,
@@ -18,6 +19,8 @@ SELECT
     a.os_detail || ' ' ||
     a.location || ' ' ||
     a.primary_ip || ' ' ||
+    a.additional_ips || ' ' ||
+    a.hypervisor || ' ' ||
     a.config_notes || ' ' ||
     IFNULL((
         SELECT group_concat(t.name, ' ')
@@ -58,18 +61,6 @@ END;
 
 CREATE TRIGGER assets_ad_fts AFTER DELETE ON assets BEGIN
     DELETE FROM assets_fts WHERE asset_id = OLD.id;
-END;
-
-CREATE TRIGGER asset_tags_ai_fts AFTER INSERT ON asset_tags BEGIN
-    DELETE FROM assets_fts WHERE asset_id = NEW.asset_id;
-    INSERT INTO assets_fts(asset_id, body)
-    SELECT asset_id, body FROM assets_fts_src WHERE asset_id = NEW.asset_id;
-END;
-
-CREATE TRIGGER asset_tags_ad_fts AFTER DELETE ON asset_tags BEGIN
-    DELETE FROM assets_fts WHERE asset_id = OLD.asset_id;
-    INSERT INTO assets_fts(asset_id, body)
-    SELECT asset_id, body FROM assets_fts_src WHERE asset_id = OLD.asset_id;
 END;
 
 CREATE TRIGGER tags_au_fts AFTER UPDATE OF name ON tags BEGIN

@@ -3,6 +3,7 @@ package search_test
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -149,12 +150,25 @@ func TestBuildFTSQuery(t *testing.T) {
 	if _, ok := search.BuildFTSQuery("   "); ok {
 		t.Fatal("expected empty")
 	}
-	if _, ok := search.BuildFTSQuery(`" OR ""`); ok {
-		t.Fatal("operator-only input should yield no tokens")
+	if _, ok := search.BuildFTSQuery("1"); ok {
+		t.Fatal("single-char token should be dropped")
 	}
 	q, ok = search.BuildFTSQuery("host-1.example")
-	if !ok || q != "host* 1* example*" {
+	// "1" dropped (len < 2)
+	if !ok || q != "host* example*" {
 		t.Fatalf("hostname token: %q ok=%v", q, ok)
+	}
+	q, ok = search.BuildFTSQuery("OR NOT")
+	if !ok || q != `"OR" "NOT"` {
+		t.Fatalf("quoted keywords: %q ok=%v", q, ok)
+	}
+	var parts []string
+	for i := 0; i < 20; i++ {
+		parts = append(parts, fmt.Sprintf("tok%d", i))
+	}
+	q, ok = search.BuildFTSQuery(strings.Join(parts, " "))
+	if !ok || len(strings.Fields(q)) != 16 {
+		t.Fatalf("token cap: %q (%d fields)", q, len(strings.Fields(q)))
 	}
 }
 
@@ -200,6 +214,30 @@ func TestSearchIndexesNonSecretsAndNotSecrets(t *testing.T) {
 		{"NEVERINDEX_ACCT_DESC", false, "account description must not be indexed"},
 		{"NEVERINDEX_NOTE_BODY", false, "note body must not be indexed"},
 		{"NEVERINDEXCIPHER", false, "secret ciphertext must not be indexed"},
+	}
+
+	mustExec(t, sqlDB, `UPDATE assets SET additional_ips = ?, hypervisor = ? WHERE id = ?`,
+		`["10.9.8.7"]`, "esxi-lab-1", id)
+	for _, tc := range []struct {
+		q    string
+		want bool
+	}{
+		{"10.9.8.7", true},
+		{"esxi-lab", true},
+	} {
+		hits, _, err := store.SearchAssets(search.Filter{Q: tc.q, Limit: 50})
+		if err != nil {
+			t.Fatalf("q=%q: %v", tc.q, err)
+		}
+		found := false
+		for _, h := range hits {
+			if h.AssetID == id {
+				found = true
+			}
+		}
+		if found != tc.want {
+			t.Fatalf("q=%q additional/hypervisor: found=%v", tc.q, found)
+		}
 	}
 	for _, tc := range cases {
 		hits, total, err := store.SearchAssets(search.Filter{Q: tc.q, Limit: 50})

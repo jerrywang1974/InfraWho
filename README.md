@@ -141,7 +141,9 @@ Pagination uses `limit` (default 50, max 200) + `offset` (default 0). Soft-delet
 
 ## Search (FTS5)
 
-`q` on asset list and `GET /api/v1/search` use SQLite FTS5. Indexed fields: asset `name`/`hostname`/`purpose`/`os_detail`/`location`/`primary_ip`/`config_notes`, tags, account **usernames**, job name+description, note **titles**. **Secrets are never indexed** (nor account descriptions / note bodies). Empty `q` on `/search` returns zero hits. Optional bench: `./scripts/bench_search.sh`.
+`q` on asset list and `GET /api/v1/search` use SQLite FTS5 (same ranked ordering when `q` is set). Indexed fields: asset `name`/`hostname`/`purpose`/`os_detail`/`location`/`primary_ip`/`additional_ips`/`hypervisor`/`config_notes`, tags, account **usernames**, job name+description, note **titles**. **Secrets are never indexed** (nor account descriptions / note bodies).
+
+Matching is **token prefix** (not SQL `%substring%`): `post` matches `postgres`, but `gres` does not. Hostnames are split on non-alnum (`web-1.example` → `web`, `1`, `example`); tokens shorter than 2 characters are dropped; at most 16 tokens are used. Empty `q` on `/search` returns zero hits. Optional bench: `./scripts/bench_search.sh`. OpenAPI for `/search` lands with PR 12b.
 
 | Method | Path | Notes |
 |--------|------|-------|
