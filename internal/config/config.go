@@ -17,15 +17,13 @@ const (
 	MasterKeySize     = 32
 )
 
-// Config holds process configuration loaded from the environment.
 type Config struct {
 	DBURL         string
 	MasterKeyFile string
 	ListenAddr    string
 }
 
-// Load reads configuration from environment variables.
-// Phase 1 accepts only sqlite:// DB URLs (K3); Postgres is not implemented.
+// Load reads env. Phase 1: require sqlite: scheme.
 func Load() (*Config, error) {
 	cfg := &Config{
 		DBURL:         getenv(EnvDBURL, DefaultDBURL),
@@ -56,11 +54,17 @@ func validateDBURL(dbURL string) error {
 	return nil
 }
 
-// LoadMasterKey reads and validates the KEK from path.
-// Accepts a raw 32-byte file or base64 (standard or raw) that decodes to 32 bytes.
+// LoadMasterKey reads a raw 32-byte file or base64 of 32 bytes.
 func LoadMasterKey(path string) ([]byte, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("%s is not set", EnvMasterKeyFile)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("read master key file %q: %w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("master key path %q is not a regular file (Docker may have created a directory for a missing bind mount — remove it and create the key file first)", path)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

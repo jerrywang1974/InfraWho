@@ -9,5 +9,4 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/infrawho /usr/local/bin/infrawho
 EXPOSE 8080
-USER nobody
 ENTRYPOINT ["/usr/local/bin/infrawho"]

@@ -9,7 +9,6 @@
 .env
 .env.*
 *.key
-lab-master.key
 
 # Local data
 /data/

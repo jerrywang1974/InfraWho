@@ -60,10 +60,18 @@ curl -sS http://127.0.0.1:8080/readyz    # ok when KEK loads
 
 ## Run with Docker Compose
 
+**Create the key file before the first `compose up`.** If `./lab-master.key` is missing, Docker creates a **directory** at that path for the bind mount; `/readyz` will stay `503` until you remove the directory and replace it with a real key file.
+
 ```bash
+# Required first — do not start Compose without this file
 openssl rand -out lab-master.key 32
 chmod 600 lab-master.key
+
+# If you already hit the footgun:
+#   rm -rf lab-master.key && openssl rand -out lab-master.key 32 && chmod 600 lab-master.key
+
 docker compose up --build
+curl -sS http://127.0.0.1:8080/readyz   # expect ok
 ```
 
 Compose bind-mounts `./lab-master.key` to `/etc/infrawho/master.key` and stores SQLite under the `infrawho_data` volume.

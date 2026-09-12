@@ -75,3 +75,11 @@ func TestLoadMasterKeyMissing(t *testing.T) {
 		t.Fatal("expected error for missing file")
 	}
 }
+
+func TestLoadMasterKeyRejectsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	_, err := LoadMasterKey(dir)
+	if err == nil {
+		t.Fatal("expected error for directory path")
+	}
+}
