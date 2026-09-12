@@ -11,6 +11,7 @@ import (
 	"github.com/jerrywang1974/InfraWho/internal/assets"
 	"github.com/jerrywang1974/InfraWho/internal/audit"
 	"github.com/jerrywang1974/InfraWho/internal/auth"
+	"github.com/jerrywang1974/InfraWho/internal/backup"
 	"github.com/jerrywang1974/InfraWho/internal/config"
 	"github.com/jerrywang1974/InfraWho/internal/db"
 	"github.com/jerrywang1974/InfraWho/internal/jobs"
@@ -128,6 +129,18 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, sqlDB *sql.DB) {
 
 	jobs.NewHandler(jobs.NewStore(sqlDB)).Register(api, authHandler.RequireOrigin)
 	notes.NewHandler(notes.NewStore(sqlDB)).Register(api, authHandler.RequireOrigin)
+
+	backupStore := backup.NewStore(sqlDB, backup.StoreOptions{
+		KeyVersion: cfg.KeyVersion,
+		LoadKEK: func() ([]byte, error) {
+			return config.LoadMasterKey(masterKeyFile)
+		},
+	})
+	backup.NewHandler(backupStore, auditStore, backup.Options{
+		TrustProxy:           cfg.TrustProxy,
+		FeatureExportSecrets: cfg.FeatureExportSecrets,
+		Limiter:              authHandler.Limiter(),
+	}).Register(api, authHandler.RequireOrigin)
 	search.NewHandler(search.NewStore(sqlDB)).Register(api, authHandler.RequireOrigin)
 
 	mux.Handle("/", authHandler.Middleware(api))
