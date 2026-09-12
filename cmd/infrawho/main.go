@@ -15,9 +15,11 @@ import (
 	"github.com/jerrywang1974/InfraWho/internal/config"
 	"github.com/jerrywang1974/InfraWho/internal/db"
 	"github.com/jerrywang1974/InfraWho/internal/jobs"
+	"github.com/jerrywang1974/InfraWho/internal/metrics"
 	"github.com/jerrywang1974/InfraWho/internal/notes"
 	"github.com/jerrywang1974/InfraWho/internal/ratelimit"
 	"github.com/jerrywang1974/InfraWho/internal/search"
+	"github.com/jerrywang1974/InfraWho/internal/security"
 )
 
 func main() {
@@ -81,8 +83,9 @@ func runServe() {
 	mux := http.NewServeMux()
 	registerRoutes(mux, cfg, sqlDB)
 
+	handler := security.Headers(mux)
 	log.Printf("infrawho listening on %s", cfg.ListenAddr)
-	if err := http.ListenAndServe(cfg.ListenAddr, mux); err != nil {
+	if err := http.ListenAndServe(cfg.ListenAddr, handler); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
 }
@@ -90,6 +93,9 @@ func runServe() {
 func registerRoutes(mux *http.ServeMux, cfg *config.Config, sqlDB *sql.DB) {
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/readyz", handleReadyz(cfg, sqlDB))
+	if cfg.FeatureMetrics {
+		mux.Handle("/metrics", metrics.Handler())
+	}
 
 	store := auth.NewStore(sqlDB)
 	authHandler := auth.NewHandler(store, ratelimit.New(), auth.Options{

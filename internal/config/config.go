@@ -17,6 +17,7 @@ const (
 	EnvTrustProxy     = "INFRAWHO_TRUST_PROXY"
 	// EnvFeatureExportSecrets enables plaintext secret export (K18). Default false.
 	EnvFeatureExportSecrets = "FEATURE_EXPORT_SECRETS"
+	EnvFeatureMetrics       = "INFRAWHO_FEATURE_METRICS"
 
 	DefaultDBURL      = "sqlite:///data/infrawho.db"
 	DefaultListenAddr = ":8080"
@@ -36,6 +37,7 @@ type Config struct {
 	TrustProxy bool
 	// FeatureExportSecrets gates POST /export with include_secrets:true (default false).
 	FeatureExportSecrets bool
+	FeatureMetrics       bool
 }
 
 // Load reads env. Phase 1: require sqlite: scheme.
@@ -49,6 +51,7 @@ func Load() (*Config, error) {
 		TrustedOrigins:       splitCSV(os.Getenv(EnvTrustedOrigins)),
 		TrustProxy:           getenvBool(EnvTrustProxy, false),
 		FeatureExportSecrets: getenvBool(EnvFeatureExportSecrets, false),
+		FeatureMetrics:       getenvBool(EnvFeatureMetrics, false),
 	}
 	if err := validateDBURL(cfg.DBURL); err != nil {
 		return nil, err
