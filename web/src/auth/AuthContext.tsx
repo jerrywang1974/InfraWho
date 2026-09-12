@@ -32,15 +32,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      let status: SetupStatus
+      let status: SetupStatus | null = null
       try {
         status = await api.getSetupStatus()
         setSetup(status)
       } catch {
-        // Keep prior setup/user on transient failures (do not wipe a valid session).
-        return
+        // Keep prior setup on transient failures; still try me() below so a
+        // cold load can restore a cookie session when only setup-status blips.
       }
-      if (status.needs_bootstrap) {
+      if (status?.needs_bootstrap) {
         setUser(null)
         return
       }

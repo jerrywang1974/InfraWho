@@ -5,7 +5,7 @@ import { ApiError } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 
 export function SetupPage() {
-  const { user, setup, loading, setUser, setSetup, refresh } = useAuth()
+  const { user, setup, loading, setUser, setSetup } = useAuth()
   const [username, setUsername] = useState('admin')
   const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
@@ -99,7 +99,19 @@ export function SetupPage() {
         acknowledge_kek_irrecoverable: ackIrrecoverable,
         acknowledge_backup_planned: ackBackup,
       })
-      await refresh()
+      // Persist succeeded — optimistically clear wizard so a status-poll blip
+      // cannot leave needsAckOnly true and strand the admin on this form.
+      setSetup({
+        needs_bootstrap: false,
+        master_key_ready: setup?.master_key_ready ?? true,
+        checklist_complete: true,
+        show_banner: false,
+      })
+      try {
+        setSetup(await api.getSetupStatus())
+      } catch {
+        // Keep optimistic setup; checklist is already persisted server-side.
+      }
     } catch (err) {
       if (err instanceof ApiError) {
         setError(err.message || '無法儲存檢查清單')
