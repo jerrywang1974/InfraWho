@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import * as api from '../api/client'
 import { ApiError } from '../api/client'
-import type { Asset } from '../api/types'
+import type { AssetDetail } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { PlaceholderPanel } from '../components/PlaceholderPanel'
+import { AccountsPanel } from '../components/AccountsPanel'
+import { JobsPanel } from '../components/JobsPanel'
+import { NotesPanel } from '../components/NotesPanel'
 import {
   formatAssetType,
   formatEnvironment,
@@ -16,35 +18,38 @@ import {
 export function AssetDetailPage() {
   const { id = '' } = useParams()
   const { user } = useAuth()
-  const [asset, setAsset] = useState<Asset | null>(null)
+  const [asset, setAsset] = useState<AssetDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    let cancelled = false
-    async function load() {
+  const canWrite = user?.role === 'admin' || user?.role === 'operator'
+  const canReveal = canWrite
+
+  const load = useCallback(async (opts?: { soft?: boolean }) => {
+    if (!id) return
+    if (!opts?.soft) {
       setLoading(true)
       setError(null)
-      try {
-        const d = await api.getAsset(id)
-        if (!cancelled) setAsset(d)
-      } catch (err) {
-        if (!cancelled) {
-          if (err instanceof ApiError) {
-            setError(err.status === 404 ? '找不到此資產' : err.message)
-          } else {
-            setError('無法載入資產')
-          }
-        }
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
     }
-    if (id) void load()
-    return () => {
-      cancelled = true
+    try {
+      const d = await api.getAsset(id)
+      setAsset(d)
+      setError(null)
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.status === 404 ? '找不到此資產' : err.message)
+      } else {
+        setError('無法載入資產')
+      }
+      if (!opts?.soft) setAsset(null)
+    } finally {
+      if (!opts?.soft) setLoading(false)
     }
   }, [id])
+
+  useEffect(() => {
+    void load()
+  }, [load])
 
   if (loading) {
     return (
@@ -117,15 +122,20 @@ export function AssetDetailPage() {
           <dd className="pre-wrap">{asset.config_notes || '—'}</dd>
         </dl>
         <p className="muted hint">
-          其他負責人僅顯示使用者 ID（尚無使用者列表 API）。帳號／排程面板於下一 PR 接上。
+          其他負責人僅顯示使用者 ID（尚無使用者列表 API）。
         </p>
       </section>
 
-      <div className="panel-grid">
-        <PlaceholderPanel title="帳號／憑證" />
-        <PlaceholderPanel title="排程工作" />
-        <PlaceholderPanel title="備註" />
-      </div>
+      <AccountsPanel
+        key={asset.id}
+        assetId={asset.id}
+        accounts={asset.accounts}
+        canWrite={canWrite}
+        canReveal={canReveal}
+        onChanged={() => void load({ soft: true })}
+      />
+      <JobsPanel key={`jobs-${asset.id}`} assetId={asset.id} canWrite={canWrite} />
+      <NotesPanel key={`notes-${asset.id}`} assetId={asset.id} canWrite={canWrite} />
     </div>
   )
 }

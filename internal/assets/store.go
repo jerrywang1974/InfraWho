@@ -96,6 +96,7 @@ type AccountSummary struct {
 	AuthType      string  `json:"auth_type"`
 	Description   string  `json:"description"`
 	LastRotatedAt *string `json:"last_rotated_at,omitempty"`
+	HasSecret     bool    `json:"has_secret"`
 }
 
 // JobSummary is a scheduled-job row summary on asset detail.
@@ -370,8 +371,9 @@ func (s *Store) GetDetail(id string) (*AssetDetail, error) {
 	d := &AssetDetail{Asset: *a, Accounts: []AccountSummary{}, Jobs: []JobSummary{}, Notes: []NoteSummary{}}
 
 	accRows, err := s.db.Query(
-		`SELECT id, username, auth_type, description, last_rotated_at
-		 FROM accounts WHERE asset_id = ? ORDER BY username COLLATE NOCASE`,
+		`SELECT a.id, a.username, a.auth_type, a.description, a.last_rotated_at,
+		        EXISTS(SELECT 1 FROM secret_payloads sp WHERE sp.account_id = a.id)
+		 FROM accounts a WHERE a.asset_id = ? ORDER BY a.username COLLATE NOCASE`,
 		id,
 	)
 	if err != nil {
@@ -381,12 +383,14 @@ func (s *Store) GetDetail(id string) (*AssetDetail, error) {
 	for accRows.Next() {
 		var acc AccountSummary
 		var rotated sql.NullString
-		if err := accRows.Scan(&acc.ID, &acc.Username, &acc.AuthType, &acc.Description, &rotated); err != nil {
+		var hasSecret int
+		if err := accRows.Scan(&acc.ID, &acc.Username, &acc.AuthType, &acc.Description, &rotated, &hasSecret); err != nil {
 			return nil, err
 		}
 		if rotated.Valid && rotated.String != "" {
 			acc.LastRotatedAt = &rotated.String
 		}
+		acc.HasSecret = hasSecret != 0
 		d.Accounts = append(d.Accounts, acc)
 	}
 	if err := accRows.Err(); err != nil {

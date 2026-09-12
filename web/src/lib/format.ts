@@ -63,3 +63,25 @@ export function formatAssetType(t: string): string {
 export function formatRole(role: string): string {
   return roleLabels[role] || role
 }
+
+const authTypeLabels: Record<string, string> = {
+  password: '密碼',
+  ssh_private_key: 'SSH 私鑰',
+  api_token: 'API Token',
+  other: '其他',
+}
+
+const schedulerLabels: Record<string, string> = {
+  cron: 'cron',
+  systemd_timer: 'systemd timer',
+  windows_task: 'Windows 工作排程',
+  other: '其他',
+}
+
+export function formatAuthType(t: string): string {
+  return authTypeLabels[t] || t
+}
+
+export function formatSchedulerType(t: string): string {
+  return schedulerLabels[t] || t
+}

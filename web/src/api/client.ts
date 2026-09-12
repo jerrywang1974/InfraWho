@@ -1,8 +1,22 @@
 import type {
+  Account,
   ApiErrorBody,
   Asset,
+  AssetDetail,
   AssetListResponse,
+  AssetNote,
+  CreateAccountInput,
   CreateAssetInput,
+  CreateJobInput,
+  CreateNoteInput,
+  JobListResponse,
+  NoteListResponse,
+  PatchAccountInput,
+  PatchJobInput,
+  PatchNoteInput,
+  RevealResponse,
+  RotateSecretInput,
+  ScheduledJob,
   SetupStatus,
   User,
 } from './types'
@@ -98,6 +112,13 @@ export function me(): Promise<User> {
   return request('/api/v1/auth/me')
 }
 
+export function stepUp(password: string): Promise<void> {
+  return request('/api/v1/auth/step-up', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  })
+}
+
 export function listAssets(params?: {
   q?: string
   limit?: number
@@ -113,9 +134,8 @@ export function listAssets(params?: {
   return request(`/api/v1/assets${qs ? `?${qs}` : ''}`)
 }
 
-/** Asset master data only — nested accounts/jobs/notes summaries are dropped until PR 10. */
-export async function getAsset(id: string): Promise<Asset> {
-  const raw = await request<Asset>(`/api/v1/assets/${encodeURIComponent(id)}`)
+export async function getAsset(id: string): Promise<AssetDetail> {
+  const raw = await request<AssetDetail>(`/api/v1/assets/${encodeURIComponent(id)}`)
   return {
     id: raw.id,
     name: raw.name,
@@ -137,6 +157,16 @@ export async function getAsset(id: string): Promise<Asset> {
     deleted_at: raw.deleted_at,
     created_at: raw.created_at,
     updated_at: raw.updated_at,
+    accounts: (raw.accounts ?? []).map((a) => ({
+      id: a.id,
+      username: a.username,
+      auth_type: a.auth_type,
+      description: a.description ?? '',
+      last_rotated_at: a.last_rotated_at,
+      has_secret: Boolean(a.has_secret),
+    })),
+    jobs: raw.jobs ?? [],
+    notes: raw.notes ?? [],
   }
 }
 
@@ -145,4 +175,91 @@ export function createAsset(body: CreateAssetInput): Promise<Asset> {
     method: 'POST',
     body: JSON.stringify(body),
   })
+}
+
+export function createAccount(assetId: string, body: CreateAccountInput): Promise<Account> {
+  return request(`/api/v1/assets/${encodeURIComponent(assetId)}/accounts`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function patchAccount(id: string, body: PatchAccountInput): Promise<Account> {
+  return request(`/api/v1/accounts/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteAccount(id: string): Promise<void> {
+  return request(`/api/v1/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export function revealAccount(id: string): Promise<RevealResponse> {
+  return request(`/api/v1/accounts/${encodeURIComponent(id)}/reveal`, { method: 'POST' })
+}
+
+export function rotateSecret(id: string, body: RotateSecretInput): Promise<Account> {
+  return request(`/api/v1/accounts/${encodeURIComponent(id)}/rotate-secret`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function listJobs(
+  assetId: string,
+  params?: { limit?: number; offset?: number },
+): Promise<JobListResponse> {
+  const sp = new URLSearchParams()
+  if (params?.limit != null) sp.set('limit', String(params.limit))
+  if (params?.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return request(`/api/v1/assets/${encodeURIComponent(assetId)}/jobs${qs ? `?${qs}` : ''}`)
+}
+
+export function createJob(assetId: string, body: CreateJobInput): Promise<ScheduledJob> {
+  return request(`/api/v1/assets/${encodeURIComponent(assetId)}/jobs`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function patchJob(id: string, body: PatchJobInput): Promise<ScheduledJob> {
+  return request(`/api/v1/jobs/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteJob(id: string): Promise<void> {
+  return request(`/api/v1/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export function listNotes(
+  assetId: string,
+  params?: { limit?: number; offset?: number },
+): Promise<NoteListResponse> {
+  const sp = new URLSearchParams()
+  if (params?.limit != null) sp.set('limit', String(params.limit))
+  if (params?.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return request(`/api/v1/assets/${encodeURIComponent(assetId)}/notes${qs ? `?${qs}` : ''}`)
+}
+
+export function createNote(assetId: string, body: CreateNoteInput): Promise<AssetNote> {
+  return request(`/api/v1/assets/${encodeURIComponent(assetId)}/notes`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function patchNote(id: string, body: PatchNoteInput): Promise<AssetNote> {
+  return request(`/api/v1/notes/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteNote(id: string): Promise<void> {
+  return request(`/api/v1/notes/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
