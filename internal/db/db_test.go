@@ -30,8 +30,17 @@ func TestSQLitePath(t *testing.T) {
 			t.Fatalf("SQLitePath(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
-	if _, err := SQLitePath("postgres://x"); err == nil {
-		t.Fatal("expected error for non-sqlite URL")
+
+	reject := []string{
+		"postgres://x",
+		"sqlite://data/infrawho.db",
+		"sqlite://./data/lab.db",
+		"sqlite:file://data/infrawho.db",
+	}
+	for _, in := range reject {
+		if _, err := SQLitePath(in); err == nil {
+			t.Fatalf("SQLitePath(%q): expected error", in)
+		}
 	}
 }
 
@@ -89,6 +98,12 @@ func TestHostnamePartialUniqueAndOptionalSecret(t *testing.T) {
 		VALUES ('a2', 'two', 'host1.example', 'vm', 'linux', 'lab', 'active')`)
 	if err == nil {
 		t.Fatal("expected unique hostname conflict among active assets")
+	}
+
+	_, err = db.Exec(`INSERT INTO assets (id, name, hostname, asset_type, os_family, environment, status)
+		VALUES ('a2b', 'case', 'Host1.Example', 'vm', 'linux', 'lab', 'active')`)
+	if err == nil {
+		t.Fatal("expected case-insensitive hostname conflict among active assets")
 	}
 
 	mustExec(t, db, `UPDATE assets SET status='retired', deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id='a1'`)

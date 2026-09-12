@@ -35,6 +35,10 @@ func SQLitePath(dbURL string) (string, error) {
 	if u.Opaque != "" {
 		return stripQuery(u.Opaque), nil
 	}
+	// Two-slash forms (sqlite://data/x.db) put a path segment in Host and open the wrong file.
+	if u.Host != "" {
+		return "", fmt.Errorf("database URL %q must not include a host; use sqlite:///abs/path or sqlite:relative.db", dbURL)
+	}
 	p := u.Path
 	if p == "" || p == "/" {
 		return "", fmt.Errorf("database URL %q has empty path", dbURL)
@@ -58,6 +62,9 @@ func parseFilePath(rest string) (string, error) {
 		u, err := url.Parse("file:" + rest)
 		if err != nil {
 			return "", fmt.Errorf("parse file: database URL: %w", err)
+		}
+		if u.Host != "" {
+			return "", fmt.Errorf("file: database URL must not include a host; use file:///abs/path or file:relative.db")
 		}
 		p := u.Path
 		if p == "" || p == "/" {

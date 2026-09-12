@@ -34,7 +34,7 @@ func Open(dbURL string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// Serialize writers; WAL still allows overlapping reads via the single pool connection.
+	// One pool connection serializes all SQLite access (avoids SQLITE_BUSY across goroutines).
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 

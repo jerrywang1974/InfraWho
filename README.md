@@ -23,7 +23,7 @@ Runnable skeleton: config loading, SQLite open + auto-migrate on startup, `/heal
 
 ### Master key (KEK)
 
-The master key **must never be committed**. `/readyz` returns `503` if the file is missing or unloadable; `/healthz` stays `200` while the process is up.
+The master key **must never be committed**. `/readyz` returns `503` if the DB is unreachable or the key file is missing/unloadable; `/healthz` stays `200` while the process is up.
 
 Generate a lab key (outside git, or a gitignored `*.key` name):
 
@@ -55,7 +55,7 @@ Checks:
 
 ```bash
 curl -sS http://127.0.0.1:8080/healthz   # ok
-curl -sS http://127.0.0.1:8080/readyz    # ok when KEK loads
+curl -sS http://127.0.0.1:8080/readyz    # ok when DB pings and KEK loads
 ```
 
 ## Run with Docker Compose

@@ -1,4 +1,4 @@
--- InfraWho Phase 1 core schema (SQLite only). No api_tokens.
+-- Core schema.
 
 CREATE TABLE users (
     id            TEXT PRIMARY KEY NOT NULL,
@@ -46,7 +46,7 @@ CREATE TABLE assets (
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
-CREATE UNIQUE INDEX assets_hostname_active_uidx ON assets(hostname) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX assets_hostname_active_uidx ON assets(hostname COLLATE NOCASE) WHERE deleted_at IS NULL;
 CREATE INDEX assets_environment_idx ON assets(environment);
 CREATE INDEX assets_owner_id_idx ON assets(owner_id);
 CREATE INDEX assets_status_idx ON assets(status);
