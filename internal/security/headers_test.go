@@ -23,15 +23,19 @@ func TestHeadersSetsCSPAndBaseline(t *testing.T) {
 	if csp == "" {
 		t.Fatal("missing CSP")
 	}
-	for _, needle := range []string{"default-src 'self'", "frame-ancestors 'none'", "object-src 'none'"} {
+	for _, needle := range []string{"default-src 'self'", "style-src 'self'", "frame-ancestors 'none'", "object-src 'none'"} {
 		if !strings.Contains(csp, needle) {
 			t.Fatalf("CSP %q missing %q", csp, needle)
 		}
+	}
+	if strings.Contains(csp, "unsafe-inline") {
+		t.Fatalf("CSP should not allow unsafe-inline: %q", csp)
 	}
 	want := map[string]string{
 		"X-Content-Type-Options":       "nosniff",
 		"X-Frame-Options":              "DENY",
 		"Referrer-Policy":              "strict-origin-when-cross-origin",
+		"Permissions-Policy":           "camera=(), microphone=(), geolocation=()",
 		"Cross-Origin-Opener-Policy":   "same-origin",
 		"Cross-Origin-Resource-Policy": "same-origin",
 	}

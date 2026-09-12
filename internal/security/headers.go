@@ -3,8 +3,9 @@ package security
 import "net/http"
 
 // DefaultCSP is a Phase 1 policy for same-origin API + future SPA from this origin.
-// 'unsafe-inline' on style-src covers simple inline styles; scripts stay 'self' only.
-const DefaultCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+// style-src stays 'self' (Vite/file CSS); add hashes/nonces or 'unsafe-inline' only
+// if an embed/UI PR demonstrates a need for inline styles.
+const DefaultCSP = "default-src 'self'; script-src 'self'; style-src 'self'; " +
 	"img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; " +
 	"base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 

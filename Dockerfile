@@ -14,4 +14,6 @@ EXPOSE 8080
 # breaks typical lab key mounts. For production, run with a matching UID, e.g.
 #   docker run --user "$(stat -c %u:%g /etc/infrawho/master.key)" …
 # or mount the key via Docker/Podman secrets readable by that user.
+# That UID must also be able to write the SQLite data path (e.g. /data); chown
+# the volume once if it was previously created as root.
 ENTRYPOINT ["/usr/local/bin/infrawho"]

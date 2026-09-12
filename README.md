@@ -80,7 +80,7 @@ curl -sS http://127.0.0.1:8080/readyz   # expect ok
 
 Compose bind-mounts `./lab-master.key` to `/etc/infrawho/master.key` and stores SQLite under the `infrawho_data` volume.
 
-The image runs as root by default so lab `0600` key bind-mounts stay readable. For production, prefer `docker run --user` matching the key file owner (or Docker/Podman secrets) — see comments in [`Dockerfile`](Dockerfile). Do not bake a fixed non-root `USER` into the image if lab keys are root-owned.
+The image runs as root by default so lab `0600` key bind-mounts stay readable. For production, prefer `docker run --user` matching the key file owner (or Docker/Podman secrets) — see comments in [`Dockerfile`](Dockerfile). That same UID must also be able to write the SQLite data path (e.g. Compose `/data`); chown the volume once if it was previously written as root. Do not bake a fixed non-root `USER` into the image if lab keys are root-owned.
 
 ## Health endpoints
 
