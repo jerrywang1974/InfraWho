@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # InfraWho DB restore from a backup.sh archive.
 # Does not touch or restore master.key — supply the KEK separately.
+# Stop the HTTP service before restoring.
 set -euo pipefail
 
 usage() {
@@ -11,6 +12,7 @@ Extracts the SQLite DB (and -wal/-shm if present) from an Infrawho backup
 tarball to PATH. Stop the HTTP service before restoring.
 
 Never extracts master.key; archives from backup.sh do not contain it.
+Only members under data/ without ".." or absolute paths are accepted.
 EOF
 }
 
@@ -49,12 +51,39 @@ if [[ ! -f "$ARCHIVE" ]]; then
   exit 1
 fi
 
-# Refuse archives that list a key path.
 listing="$(tar -tzf "$ARCHIVE")"
+
+# Refuse archives that list a key path.
 if printf '%s\n' "$listing" | grep -E '(^|/)master\.key$|\.key$' >/dev/null; then
   echo "refusing restore: archive contains a key path" >&2
   exit 1
 fi
+
+# Allowlist: only relative members under data/, no ".." components.
+while IFS= read -r member; do
+  [[ -z "$member" ]] && continue
+  case "$member" in
+    data|data/)
+      continue
+      ;;
+    data/*)
+      ;;
+    *)
+      echo "refusing restore: member outside data/: $member" >&2
+      exit 1
+      ;;
+  esac
+  case "$member" in
+    /*|*/..|*/../*|../*|..)
+      echo "refusing restore: unsafe member path: $member" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$member" == *'..'* ]]; then
+    echo "refusing restore: unsafe member path: $member" >&2
+    exit 1
+  fi
+done <<< "$listing"
 
 db_name="$(basename -- "$DB_PATH")"
 if [[ "$db_name" == "master.key" || "$db_name" == *.key ]]; then
@@ -67,14 +96,18 @@ staging="$(mktemp -d "${TMPDIR:-/tmp}/infrawho-restore.XXXXXX")"
 cleanup() { rm -rf -- "$staging"; }
 trap cleanup EXIT
 
-tar -xzf "$ARCHIVE" -C "$staging"
+# Extract only allowlisted file members under data/ (skip directory entries).
+mapfile -t members < <(printf '%s\n' "$listing" | grep -E '^data/' | grep -v '/$' || true)
+if [[ ${#members[@]} -eq 0 ]]; then
+  echo "no data/ file members in archive" >&2
+  exit 1
+fi
+tar -xzf "$ARCHIVE" -C "$staging" -- "${members[@]}"
 
-# Prefer data/<name> matching destination basename; else first *.db under data/.
 src=""
 if [[ -f "$staging/data/$db_name" ]]; then
   src="$staging/data/$db_name"
 else
-  # shellcheck disable=SC2012
   src="$(find "$staging/data" -maxdepth 1 -type f -name '*.db' | head -n 1 || true)"
 fi
 

@@ -292,14 +292,8 @@ func DocumentHasSecrets(doc *Document) bool {
 // Import inserts assets (and nested rows) from doc. Rejects on any active hostname conflict.
 // Secrets are resealed under the current KEK. Audit is written in the same transaction.
 func (s *Store) Import(doc *Document, now time.Time, aw audit.WriteInput) (*importResult, error) {
-	if doc == nil {
-		return nil, ErrInvalidDocument
-	}
-	if doc.Version != 0 && doc.Version != DocumentVersion {
-		return nil, fmt.Errorf("%w: unsupported version %d", ErrInvalidDocument, doc.Version)
-	}
-	if doc.Assets == nil {
-		doc.Assets = []ExportAsset{}
+	if err := validateDocument(doc); err != nil {
+		return nil, err
 	}
 
 	needKEK := DocumentHasSecrets(doc)
@@ -313,17 +307,15 @@ func (s *Store) Import(doc *Document, now time.Time, aw audit.WriteInput) (*impo
 	}
 
 	// Pre-check hostnames for conflicts (case-insensitive among active assets).
-	seen := map[string]struct{}{}
+	// Map lower(hostname) → original casing for conflict messages.
+	seen := map[string]string{}
 	for _, a := range doc.Assets {
-		hn := strings.TrimSpace(a.Hostname)
-		if hn == "" {
-			return nil, fmt.Errorf("%w: asset hostname is required", ErrInvalidDocument)
-		}
+		hn := a.Hostname
 		key := strings.ToLower(hn)
-		if _, ok := seen[key]; ok {
-			return nil, fmt.Errorf("%w: duplicate hostname %q in import", ErrHostnameConflict, hn)
+		if prev, ok := seen[key]; ok {
+			return nil, fmt.Errorf("%w: duplicate hostname %q in import", ErrHostnameConflict, prev)
 		}
-		seen[key] = struct{}{}
+		seen[key] = hn
 		var n int
 		err := s.db.QueryRow(
 			`SELECT COUNT(*) FROM assets WHERE hostname = ? COLLATE NOCASE AND deleted_at IS NULL`,
@@ -353,8 +345,8 @@ func (s *Store) Import(doc *Document, now time.Time, aw audit.WriteInput) (*impo
 		return nil, err
 	}
 
-	// Re-check conflicts under the write lock.
-	for hn := range seen {
+	// Re-check conflicts under the write lock (preserve original hostname casing).
+	for _, hn := range seen {
 		var n int
 		err := conn.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM assets WHERE hostname = ? COLLATE NOCASE AND deleted_at IS NULL`,
@@ -376,15 +368,7 @@ func (s *Store) Import(doc *Document, now time.Time, aw audit.WriteInput) (*impo
 		if err != nil {
 			return nil, err
 		}
-		status := strings.TrimSpace(a.Status)
-		if status == "" || status == "retired" {
-			status = "active"
-		}
-		ips := a.AdditionalIPs
-		if ips == nil {
-			ips = []string{}
-		}
-		ipsJSON, err := json.Marshal(ips)
+		ipsJSON, err := json.Marshal(a.AdditionalIPs)
 		if err != nil {
 			return nil, err
 		}
@@ -394,10 +378,10 @@ func (s *Store) Import(doc *Document, now time.Time, aw audit.WriteInput) (*impo
 				primary_ip, additional_ips, location, hypervisor, owner_id, backup_owner_id,
 				status, config_notes, deleted_at, created_at, updated_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL, ?, ?)`,
-			assetID, strings.TrimSpace(a.Name), strings.TrimSpace(a.Hostname),
+			assetID, a.Name, a.Hostname,
 			a.AssetType, a.OSFamily, a.OSDetail, a.Environment, a.Purpose,
 			a.PrimaryIP, string(ipsJSON), a.Location, a.Hypervisor,
-			status, a.ConfigNotes, ts, ts,
+			a.Status, a.ConfigNotes, ts, ts,
 		)
 		if err != nil {
 			if isUniqueViolation(err) {
@@ -415,12 +399,11 @@ func (s *Store) Import(doc *Document, now time.Time, aw audit.WriteInput) (*impo
 			if err != nil {
 				return nil, err
 			}
-			username := strings.TrimSpace(acc.Username)
 			var lastRotated any
 			_, err = conn.ExecContext(ctx,
 				`INSERT INTO accounts (id, asset_id, username, auth_type, description, last_rotated_at, created_at, updated_at)
 				 VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
-				accID, assetID, username, acc.AuthType, acc.Description, ts, ts,
+				accID, assetID, acc.Username, acc.AuthType, acc.Description, ts, ts,
 			)
 			if err != nil {
 				return nil, err
@@ -493,7 +476,7 @@ func (s *Store) Import(doc *Document, now time.Time, aw audit.WriteInput) (*impo
 			result.ImportedAssets, result.ImportedAccounts, needKEK,
 		)
 	}
-	if err := writeAuditConn(ctx, conn, aw); err != nil {
+	if err := writeAuditConn(ctx, conn, aw, now); err != nil {
 		return nil, err
 	}
 
@@ -504,7 +487,7 @@ func (s *Store) Import(doc *Document, now time.Time, aw audit.WriteInput) (*impo
 	return result, nil
 }
 
-func writeAuditConn(ctx context.Context, conn *sql.Conn, in audit.WriteInput) error {
+func writeAuditConn(ctx context.Context, conn *sql.Conn, in audit.WriteInput, now time.Time) error {
 	metadata := in.Metadata
 	if metadata == "" {
 		metadata = "{}"
@@ -516,7 +499,7 @@ func writeAuditConn(ctx context.Context, conn *sql.Conn, in audit.WriteInput) er
 	_, err = conn.ExecContext(ctx,
 		`INSERT INTO audit_events (id, actor_id, action, resource_type, resource_id, outcome, ip, user_agent, metadata, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, in.ActorID, in.Action, in.ResourceType, in.ResourceID, in.Outcome, in.IP, in.UserAgent, metadata, formatTime(time.Now()),
+		id, in.ActorID, in.Action, in.ResourceType, in.ResourceID, in.Outcome, in.IP, in.UserAgent, metadata, formatTime(now),
 	)
 	return err
 }

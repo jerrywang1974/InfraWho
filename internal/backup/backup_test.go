@@ -3,12 +3,14 @@ package backup_test
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -56,7 +58,10 @@ func testServer(t *testing.T, exportSecrets bool) (http.Handler, *audit.Store, *
 	accountStore := accounts.NewStore(sqlDB, accounts.StoreOptions{KeyVersion: "kek-v1", LoadKEK: loadKEK})
 	accountH := accounts.NewHandler(accountStore, auditStore, accounts.Options{Limiter: limiter})
 	backupStore := backup.NewStore(sqlDB, backup.StoreOptions{KeyVersion: "kek-v1", LoadKEK: loadKEK})
-	backupH := backup.NewHandler(backupStore, auditStore, backup.Options{FeatureExportSecrets: exportSecrets})
+	backupH := backup.NewHandler(backupStore, auditStore, backup.Options{
+		FeatureExportSecrets: exportSecrets,
+		Limiter:              limiter,
+	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/auth/login", ah.Login)
@@ -212,7 +217,7 @@ func TestExportMetadataMatrixB(t *testing.T) {
 }
 
 func TestExportSecretsFeatureDisabled(t *testing.T) {
-	srv, _, _ := testServer(t, false)
+	srv, auditStore, _ := testServer(t, false)
 	tok := bootstrap(t, srv)
 	seedAssetWithSecret(t, srv, tok, "export-off.example")
 	stepUp(t, srv, tok)
@@ -220,6 +225,10 @@ func TestExportSecretsFeatureDisabled(t *testing.T) {
 	rec := doJSON(t, srv, http.MethodPost, "/api/v1/export", tok, `{"include_secrets":true}`)
 	if rec.Code != http.StatusForbidden || errorCode(rec.Body) != "feature_disabled" {
 		t.Fatalf("expected feature_disabled: %d %s", rec.Code, rec.Body.String())
+	}
+	events, total, err := auditStore.List(audit.ListFilter{Action: audit.ActionExportWithSecrets, Limit: 5})
+	if err != nil || total < 1 || events[0].Outcome != audit.OutcomeDenied {
+		t.Fatalf("denied audit: total=%d err=%v events=%v", total, err, events)
 	}
 }
 
@@ -389,13 +398,16 @@ func TestBackupScriptExcludesMasterKey(t *testing.T) {
 	}
 
 	cmd := exec.Command("bash", script, "--db", dbPath, "--out", outDir)
+	cmd.Env = append(os.Environ(), "INFRAWHO_BACKUP_ALLOW_HOT_COPY=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("backup.sh failed: %v\n%s", err, out)
 	}
-	archive := strings.TrimSpace(string(out))
+	// Last line is the archive path (warnings may precede it).
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	archive := strings.TrimSpace(lines[len(lines)-1])
 	if archive == "" || !strings.HasSuffix(archive, ".tar.gz") {
-		t.Fatalf("unexpected archive path: %q", archive)
+		t.Fatalf("unexpected archive path: %q (full out=%q)", archive, out)
 	}
 
 	listCmd := exec.Command("tar", "-tzf", archive)
@@ -404,8 +416,15 @@ func TestBackupScriptExcludesMasterKey(t *testing.T) {
 		t.Fatalf("tar tz: %v\n%s", err, listOut)
 	}
 	listing := string(listOut)
-	if strings.Contains(listing, "master.key") || strings.Contains(listing, ".key") {
-		t.Fatalf("archive must not contain key paths:\n%s", listing)
+	// Align with scripts/backup.sh contract regex.
+	for _, line := range strings.Split(listing, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if matched, _ := regexp.MatchString(`(^|/)master\.key$|\.key$`, line); matched {
+			t.Fatalf("archive must not contain key paths:\n%s", listing)
+		}
 	}
 	if !strings.Contains(listing, "infrawho.db") {
 		t.Fatalf("archive missing db:\n%s", listing)
@@ -425,5 +444,190 @@ func TestBackupScriptExcludesMasterKey(t *testing.T) {
 	}
 	if string(got) != "SQLite fake db" {
 		t.Fatalf("restored content mismatch: %q", got)
+	}
+}
+
+func TestExportMetadataAsOperator(t *testing.T) {
+	srv, auditStore, authStore := testServer(t, false)
+	tok := bootstrap(t, srv)
+	seedAssetWithSecret(t, srv, tok, "op-export.example")
+
+	hash, err := auth.HashPassword("password1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authStore.CreateUser("op1", "Op", auth.RoleOperator, hash); err != nil {
+		t.Fatal(err)
+	}
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/auth/login", "", `{"username":"op1","password":"password1"}`)
+	opTok := cookieValue(rec, auth.SessionCookieName)
+	if opTok == "" {
+		t.Fatal("operator login failed")
+	}
+
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/export", opTok, `{"include_secrets":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("operator metadata export: %d %s", rec.Code, rec.Body.String())
+	}
+	var doc backup.Document
+	_ = json.NewDecoder(rec.Body).Decode(&doc)
+	if doc.IncludeSecrets || len(doc.Assets) != 1 || doc.Assets[0].Accounts[0].Secret != nil {
+		t.Fatalf("unexpected doc: %#v", doc)
+	}
+	events, total, err := auditStore.List(audit.ListFilter{Action: audit.ActionExportMetadata, Limit: 5})
+	if err != nil || total < 1 {
+		t.Fatalf("audit: total=%d err=%v events=%v", total, err, events)
+	}
+}
+
+func TestViewerDeniedExportAndImport(t *testing.T) {
+	srv, _, authStore := testServer(t, false)
+	tok := bootstrap(t, srv)
+	hash, err := auth.HashPassword("password1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authStore.CreateUser("viewer1", "V", auth.RoleViewer, hash); err != nil {
+		t.Fatal(err)
+	}
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/auth/login", "", `{"username":"viewer1","password":"password1"}`)
+	vtok := cookieValue(rec, auth.SessionCookieName)
+
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/export", vtok, `{}`)
+	if rec.Code != http.StatusForbidden || errorCode(rec.Body) != "forbidden" {
+		t.Fatalf("viewer export: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/import", vtok, `{"version":1,"assets":[]}`)
+	if rec.Code != http.StatusForbidden || errorCode(rec.Body) != "forbidden" {
+		t.Fatalf("viewer import: %d %s", rec.Code, rec.Body.String())
+	}
+	_ = tok
+}
+
+func TestImportMetadataWithoutStepUp(t *testing.T) {
+	srv, auditStore, _ := testServer(t, false)
+	tok := bootstrap(t, srv)
+	body := `{
+		"version":1,
+		"include_secrets":false,
+		"assets":[{
+			"name":"Meta","hostname":"meta-import.example","asset_type":"vm","os_family":"linux",
+			"environment":"lab","purpose":"x","status":"active","additional_ips":[],
+			"tags":[],"accounts":[{"username":"u","auth_type":"password","description":"","has_secret":false}],
+			"jobs":[],"notes":[]
+		}]
+	}`
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/import", tok, body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("metadata import: %d %s", rec.Code, rec.Body.String())
+	}
+	events, total, err := auditStore.List(audit.ListFilter{Action: audit.ActionImport, Limit: 5})
+	if err != nil || total < 1 {
+		t.Fatalf("import audit: total=%d err=%v events=%v", total, err, events)
+	}
+}
+
+func TestImportRejectsInvalidEnumsAndEmptyName(t *testing.T) {
+	srv, _, _ := testServer(t, false)
+	tok := bootstrap(t, srv)
+
+	badType := `{
+		"version":1,"assets":[{
+			"name":"X","hostname":"bad-type.example","asset_type":"nope","os_family":"linux",
+			"environment":"lab","purpose":"","status":"active","additional_ips":[],
+			"tags":[],"accounts":[],"jobs":[],"notes":[]
+		}]
+	}`
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/import", tok, badType)
+	if rec.Code != http.StatusUnprocessableEntity || errorCode(rec.Body) != "validation_error" {
+		t.Fatalf("bad asset_type: %d %s", rec.Code, rec.Body.String())
+	}
+
+	badAuth := `{
+		"version":1,"assets":[{
+			"name":"X","hostname":"bad-auth.example","asset_type":"vm","os_family":"linux",
+			"environment":"lab","purpose":"","status":"active","additional_ips":[],
+			"tags":[],"accounts":[{"username":"u","auth_type":"bogus","description":""}],
+			"jobs":[],"notes":[]
+		}]
+	}`
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/import", tok, badAuth)
+	if rec.Code != http.StatusUnprocessableEntity || errorCode(rec.Body) != "validation_error" {
+		t.Fatalf("bad auth_type: %d %s", rec.Code, rec.Body.String())
+	}
+
+	emptyName := `{
+		"version":1,"assets":[{
+			"name":"","hostname":"empty-name.example","asset_type":"vm","os_family":"linux",
+			"environment":"lab","purpose":"","status":"active","additional_ips":[],
+			"tags":[],"accounts":[],"jobs":[],"notes":[]
+		}]
+	}`
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/import", tok, emptyName)
+	if rec.Code != http.StatusUnprocessableEntity || errorCode(rec.Body) != "validation_error" {
+		t.Fatalf("empty name: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+type failAuditor struct {
+	failOn string
+	inner  *audit.Store
+}
+
+func (f *failAuditor) Write(in audit.WriteInput) error {
+	if in.Action == f.failOn {
+		return errors.New("forced audit failure")
+	}
+	if f.inner != nil {
+		return f.inner.Write(in)
+	}
+	return nil
+}
+
+func TestExportSecretsFailsClosedWhenAuditFails(t *testing.T) {
+	sqlDB, err := db.Open("sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	kekPath := writeTempKEK(t)
+	limiter := ratelimit.New()
+	authStore := auth.NewStore(sqlDB)
+	ah := auth.NewHandler(authStore, limiter, auth.Options{
+		CookieSecure:   false,
+		MasterKeyReady: func() bool { return true },
+	})
+	auditStore := audit.NewStore(sqlDB)
+	assetH := assets.NewHandler(assets.NewStore(sqlDB), assets.Options{})
+	loadKEK := func() ([]byte, error) { return config.LoadMasterKey(kekPath) }
+	accountStore := accounts.NewStore(sqlDB, accounts.StoreOptions{KeyVersion: "kek-v1", LoadKEK: loadKEK})
+	accountH := accounts.NewHandler(accountStore, auditStore, accounts.Options{Limiter: limiter})
+	backupStore := backup.NewStore(sqlDB, backup.StoreOptions{KeyVersion: "kek-v1", LoadKEK: loadKEK})
+	failing := &failAuditor{failOn: audit.ActionExportWithSecrets, inner: auditStore}
+	backupH := backup.NewHandler(backupStore, failing, backup.Options{
+		FeatureExportSecrets: true,
+		Limiter:              limiter,
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/auth/login", ah.Login)
+	mux.HandleFunc("/api/v1/auth/step-up", ah.StepUp)
+	mux.HandleFunc("/api/v1/setup/bootstrap", ah.Bootstrap)
+	assetH.Register(mux, ah.RequireOrigin)
+	accountH.Register(mux, ah.RequireOrigin)
+	backupH.Register(mux, ah.RequireOrigin)
+	srv := ah.Middleware(mux)
+
+	tok := bootstrap(t, srv)
+	seedAssetWithSecret(t, srv, tok, "fail-export.example")
+	stepUp(t, srv, tok)
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/export", tok, `{"include_secrets":true}`)
+	if rec.Code != http.StatusInternalServerError || errorCode(strings.NewReader(rec.Body.String())) != "internal_error" {
+		t.Fatalf("export audit fail: %d %s", rec.Code, rec.Body.String())
+	}
+	raw := rec.Body.String()
+	if strings.Contains(raw, "s3cret") {
+		t.Fatalf("plaintext secret must not appear when audit fails: %s", raw)
 	}
 }

@@ -11,6 +11,15 @@ import (
 
 	"github.com/jerrywang1974/InfraWho/internal/audit"
 	"github.com/jerrywang1974/InfraWho/internal/auth"
+	"github.com/jerrywang1974/InfraWho/internal/ratelimit"
+)
+
+const (
+	// ExportSecretsSessionLimit caps plaintext secret exports per session window.
+	ExportSecretsSessionLimit = 5
+	ExportSecretsWindow       = time.Minute
+	// MaxImportBodyBytes caps portable import documents (32 MiB).
+	MaxImportBodyBytes = 32 << 20
 )
 
 // Auditor records audit events.
@@ -22,6 +31,7 @@ type Auditor interface {
 type Handler struct {
 	store                *Store
 	audit                Auditor
+	limiter              *ratelimit.Limiter
 	trustProxy           bool
 	featureExportSecrets bool
 }
@@ -30,12 +40,18 @@ type Handler struct {
 type Options struct {
 	TrustProxy           bool
 	FeatureExportSecrets bool
+	Limiter              *ratelimit.Limiter
 }
 
 func NewHandler(store *Store, auditor Auditor, opts Options) *Handler {
+	lim := opts.Limiter
+	if lim == nil {
+		lim = ratelimit.New()
+	}
 	return &Handler{
 		store:                store,
 		audit:                auditor,
+		limiter:              lim,
 		trustProxy:           opts.TrustProxy,
 		featureExportSecrets: opts.FeatureExportSecrets,
 	}
@@ -63,6 +79,17 @@ func (h *Handler) auditBase(r *http.Request) audit.WriteInput {
 		ActorID:   h.actorID(r),
 		IP:        h.ip(r),
 		UserAgent: r.UserAgent(),
+	}
+}
+
+func (h *Handler) auditDeniedSecrets(r *http.Request, reason, code string) {
+	in := h.auditBase(r)
+	in.Action = audit.ActionExportWithSecrets
+	in.ResourceType = "export"
+	in.Outcome = audit.OutcomeDenied
+	in.Metadata = `{"include_secrets":true,"reason":"` + reason + `","code":"` + code + `"}`
+	if err := h.audit.Write(in); err != nil {
+		log.Printf("backup: denied export audit failed reason=%s: %v", reason, err)
 	}
 }
 
@@ -94,17 +121,40 @@ func (h *Handler) Export(w http.ResponseWriter, r *http.Request) {
 
 	if req.IncludeSecrets {
 		if !h.featureExportSecrets {
+			h.auditDeniedSecrets(r, "feature_disabled", "feature_disabled")
 			writeError(w, http.StatusForbidden, "feature_disabled", "Secret export is disabled")
 			return
 		}
 		u, ok := auth.UserFromContext(r.Context())
 		if !ok || !u.Role.CanExportSecrets() {
+			h.auditDeniedSecrets(r, "forbidden", "forbidden")
 			writeError(w, http.StatusForbidden, "forbidden", "Insufficient role")
 			return
 		}
 		sess, ok := auth.SessionFromContext(r.Context())
 		if !ok || !sess.StepUpActive(time.Now().UTC()) {
+			h.auditDeniedSecrets(r, "step_up_required", "step_up_required")
 			writeError(w, http.StatusForbidden, "step_up_required", "Step-up authentication required")
+			return
+		}
+
+		limitKey := "export_secrets:session:" + sess.ID
+		allowed, needDenyAudit := h.limiter.AllowReport(limitKey, ExportSecretsSessionLimit, ExportSecretsWindow)
+		if !allowed {
+			if needDenyAudit {
+				in := h.auditBase(r)
+				in.Action = audit.ActionExportWithSecrets
+				in.ResourceType = "export"
+				in.Outcome = audit.OutcomeDenied
+				in.Metadata = `{"include_secrets":true,"reason":"session_rate_limit"}`
+				if err := h.audit.Write(in); err != nil {
+					log.Printf("backup: export rate-limit audit failed: %v", err)
+					writeError(w, http.StatusInternalServerError, "internal_error", "Could not record audit event")
+					return
+				}
+				h.limiter.ConfirmDeny(limitKey)
+			}
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "Secret export rate limit exceeded")
 			return
 		}
 	}
@@ -142,8 +192,19 @@ func (h *Handler) Export(w http.ResponseWriter, r *http.Request) {
 
 // Import handles POST /api/v1/import (hostname conflict = reject).
 func (h *Handler) Import(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxImportBodyBytes)
 	var doc Document
 	if err := decodeJSON(r, &doc); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) || errors.Is(err, io.ErrUnexpectedEOF) && r.ContentLength > MaxImportBodyBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "Import body exceeds size limit")
+			return
+		}
+		// MaxBytesReader returns an error whose message contains "http: request body too large".
+		if strings.Contains(err.Error(), "request body too large") {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "Import body exceeds size limit")
+			return
+		}
 		writeError(w, http.StatusUnprocessableEntity, "validation_error", "Invalid JSON body")
 		return
 	}
