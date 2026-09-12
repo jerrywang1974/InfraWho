@@ -6,7 +6,7 @@ Self-hosted CMDB and credential vault for small infra teams (Phase 1).
 
 ## Status
 
-Auth-capable API skeleton: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Vault crypto and UI come in later PRs.
+Auth + vault: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, credential vault crypto (`internal/vault`), `infrawho keys rewrap` CLI, `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Assets/UI come in later PRs.
 
 ## Requirements
 
@@ -43,6 +43,31 @@ chmod 600 lab-master.key
 ```
 
 Production-oriented placement: host path such as `/etc/infrawho/master.key` with mode `0600`, bind-mounted read-only into the container. Keep an offline copy of the KEK separate from DB backups — losing the KEK makes ciphertext permanently unrecoverable.
+
+### KEK rotation (stop-the-world)
+
+Secrets use envelope encryption: a per-secret DEK (AES-256-GCM) is wrapped by the KEK. Rotation is a **foreground** classic DEK rewrap — it unwraps/wraps DEKs and updates `key_version` only; `nonce` / `ciphertext` are unchanged.
+
+**Runbook:**
+
+1. **Stop** the HTTP service (`docker compose stop infrawho` or equivalent).
+2. Generate the new KEK file, then run:
+
+```bash
+infrawho keys rewrap --from kek-v1 --to kek-v2 \
+  --old-key-file /etc/infrawho/master-v1.key \
+  --new-key-file /etc/infrawho/master-v2.key
+```
+
+Uses `INFRAWHO_DB_URL`. Re-run if interrupted; keep **both** key files until `remaining_from=0`. Do **not** start the app mid-rotation.
+
+3. Point `INFRAWHO_MASTER_KEY_FILE` **only** at the new key.
+4. **Start** the service; confirm `GET /readyz` and sample a reveal on a non-critical account.
+5. Destroy the old KEK only after checklist confirmation (`COUNT` of old `key_version` is 0).
+
+```bash
+infrawho keys --help   # prints the same runbook
+```
 
 ## Run locally
 

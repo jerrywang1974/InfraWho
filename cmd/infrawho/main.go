@@ -2,8 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/jerrywang1974/InfraWho/internal/auth"
 	"github.com/jerrywang1974/InfraWho/internal/config"
@@ -12,6 +14,42 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "keys":
+			if err := runKeys(os.Args[2:]); err != nil {
+				log.Fatalf("keys: %v", err)
+			}
+			return
+		case "serve":
+			runServe()
+			return
+		case "help", "-h", "--help":
+			printRootUsage()
+			return
+		}
+	}
+	runServe()
+}
+
+func printRootUsage() {
+	fmt.Print(`infrawho — InfraWho server and maintenance CLI
+
+Usage:
+  infrawho              Start the HTTP server (default)
+  infrawho serve        Start the HTTP server
+  infrawho keys rewrap  Rewrap secret DEKs under a new KEK (stop HTTP first)
+
+Environment:
+  INFRAWHO_DB_URL            SQLite URL (default sqlite:///data/infrawho.db)
+  INFRAWHO_MASTER_KEY_FILE   Path to current KEK file (server readiness)
+  INFRAWHO_LISTEN_ADDR       HTTP listen address (default :8080)
+
+See: infrawho keys --help for the KEK rotation runbook.
+`)
+}
+
+func runServe() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)
