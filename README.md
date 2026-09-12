@@ -136,7 +136,7 @@ Pagination uses `limit` (default 50, max 200) + `offset` (default 0). Soft-delet
 | `GET` | `/api/v1/assets/{id}` | Detail + accounts/jobs/notes summaries (no secrets) |
 | `PATCH` | `/api/v1/assets/{id}` | Update metadata; rejects `deleted_at` / `status=retired` (422) |
 | `DELETE` | `/api/v1/assets/{id}` | Soft-delete (`status=retired`, `deleted_at=now`); admin + step-up |
-| `POST` | `/api/v1/assets/{id}/purge` | Hard-delete asset and cascaded rows; admin + step-up |
+| `POST` | `/api/v1/assets/{id}/purge` | Hard-delete soft-deleted asset and cascaded rows; admin + step-up (409 if still active) |
 
 Example first-run (after KEK is in place):
 

@@ -17,7 +17,17 @@ var (
 	ErrNotFound       = errors.New("asset not found")
 	ErrConflict       = errors.New("asset conflict")
 	ErrAlreadyDeleted = errors.New("asset already soft-deleted")
+	ErrNotSoftDeleted = errors.New("asset must be soft-deleted before purge")
+	ErrInvalidOwner   = errors.New("invalid owner reference")
 )
+
+// AuditWrite carries actor context for transactional audit inserts.
+type AuditWrite struct {
+	ActorID   *string
+	Action    string
+	IP        string
+	UserAgent string
+}
 
 // Store persists assets and related tag rows.
 type Store struct {
@@ -269,7 +279,7 @@ func (s *Store) Create(in *createRequest, now time.Time) (*Asset, error) {
 			return nil, err
 		}
 		if !ok {
-			return nil, fmt.Errorf("%w: owner_id", ErrNotFound)
+			return nil, fmt.Errorf("%w: owner_id", ErrInvalidOwner)
 		}
 	}
 	if in.BackupOwnerID != nil && *in.BackupOwnerID != "" {
@@ -278,7 +288,7 @@ func (s *Store) Create(in *createRequest, now time.Time) (*Asset, error) {
 			return nil, err
 		}
 		if !ok {
-			return nil, fmt.Errorf("%w: backup_owner_id", ErrNotFound)
+			return nil, fmt.Errorf("%w: backup_owner_id", ErrInvalidOwner)
 		}
 	}
 
@@ -490,7 +500,7 @@ func (s *Store) Update(id string, in *patchRequest, now time.Time) (*Asset, erro
 				return nil, err
 			}
 			if n == 0 {
-				return nil, fmt.Errorf("%w: owner_id", ErrNotFound)
+				return nil, fmt.Errorf("%w: owner_id", ErrInvalidOwner)
 			}
 			cur.OwnerID = in.OwnerID
 		} else {
@@ -504,7 +514,7 @@ func (s *Store) Update(id string, in *patchRequest, now time.Time) (*Asset, erro
 				return nil, err
 			}
 			if n == 0 {
-				return nil, fmt.Errorf("%w: backup_owner_id", ErrNotFound)
+				return nil, fmt.Errorf("%w: backup_owner_id", ErrInvalidOwner)
 			}
 			cur.BackupOwnerID = in.BackupOwnerID
 		} else {
@@ -556,10 +566,17 @@ func (s *Store) Update(id string, in *patchRequest, now time.Time) (*Asset, erro
 	return s.Get(id)
 }
 
-// SoftDelete sets status=retired and deleted_at.
-func (s *Store) SoftDelete(id string, now time.Time) (*Asset, error) {
+// SoftDelete sets status=retired and deleted_at. When audit is non-nil, the
+// audit row is written in the same transaction (rolled back on audit failure).
+func (s *Store) SoftDelete(id string, now time.Time, audit *AuditWrite) (*Asset, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	ts := formatTime(now)
-	res, err := s.db.Exec(
+	res, err := tx.Exec(
 		`UPDATE assets SET status = 'retired', deleted_at = ?, updated_at = ?
 		 WHERE id = ? AND deleted_at IS NULL`,
 		ts, ts, id,
@@ -572,21 +589,52 @@ func (s *Store) SoftDelete(id string, now time.Time) (*Asset, error) {
 		return nil, err
 	}
 	if n == 0 {
-		a, err := s.Get(id)
+		var deleted sql.NullString
+		err := tx.QueryRow(`SELECT deleted_at FROM assets WHERE id = ?`, id).Scan(&deleted)
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
 		if err != nil {
 			return nil, err
 		}
-		if a.DeletedAt != nil {
+		if deleted.Valid && deleted.String != "" {
 			return nil, ErrAlreadyDeleted
 		}
 		return nil, ErrNotFound
 	}
+	if audit != nil {
+		if err := writeAuditTx(tx, audit.ActorID, audit.Action, "asset", &id, "success", audit.IP, audit.UserAgent, "{}"); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return s.Get(id)
 }
 
-// Purge hard-deletes an asset and cascaded children.
-func (s *Store) Purge(id string) error {
-	res, err := s.db.Exec(`DELETE FROM assets WHERE id = ?`, id)
+// Purge hard-deletes a soft-deleted asset and cascaded children.
+// Active assets must be soft-deleted first (ErrNotSoftDeleted).
+func (s *Store) Purge(id string, audit *AuditWrite) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var deleted sql.NullString
+	err = tx.QueryRow(`SELECT deleted_at FROM assets WHERE id = ?`, id).Scan(&deleted)
+	if err == sql.ErrNoRows {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !deleted.Valid || deleted.String == "" {
+		return ErrNotSoftDeleted
+	}
+
+	res, err := tx.Exec(`DELETE FROM assets WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -597,7 +645,12 @@ func (s *Store) Purge(id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	if audit != nil {
+		if err := writeAuditTx(tx, audit.ActorID, audit.Action, "asset", &id, "success", audit.IP, audit.UserAgent, "{}"); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // List returns assets matching filter plus total count (before limit/offset).
@@ -670,14 +723,53 @@ func (s *Store) List(f ListFilter) ([]Asset, int, error) {
 	if items == nil {
 		items = []Asset{}
 	}
+	ids := make([]string, len(items))
 	for i := range items {
-		tags, err := s.loadTags(items[i].ID)
-		if err != nil {
-			return nil, 0, err
+		ids[i] = items[i].ID
+		items[i].Tags = []string{}
+	}
+	byAsset, err := s.loadTagsForAssets(ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range items {
+		if tags, ok := byAsset[items[i].ID]; ok {
+			items[i].Tags = tags
 		}
-		items[i].Tags = tags
 	}
 	return items, total, nil
+}
+
+func (s *Store) loadTagsForAssets(ids []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows, err := s.db.Query(
+		`SELECT at.asset_id, t.name FROM asset_tags at
+		 INNER JOIN tags t ON t.id = at.tag_id
+		 WHERE at.asset_id IN (`+strings.Join(placeholders, ",")+`)
+		 ORDER BY at.asset_id, t.name COLLATE NOCASE`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var assetID, name string
+		if err := rows.Scan(&assetID, &name); err != nil {
+			return nil, err
+		}
+		out[assetID] = append(out[assetID], name)
+	}
+	return out, rows.Err()
 }
 
 func escapeLike(s string) string {
@@ -687,6 +779,14 @@ func escapeLike(s string) string {
 
 // WriteAudit inserts an audit_events row.
 func (s *Store) WriteAudit(actorID *string, action, resourceType string, resourceID *string, outcome, ip, userAgent, metadata string) error {
+	return writeAuditTx(s.db, actorID, action, resourceType, resourceID, outcome, ip, userAgent, metadata)
+}
+
+type execContexter interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func writeAuditTx(db execContexter, actorID *string, action, resourceType string, resourceID *string, outcome, ip, userAgent, metadata string) error {
 	if metadata == "" {
 		metadata = "{}"
 	}
@@ -694,7 +794,7 @@ func (s *Store) WriteAudit(actorID *string, action, resourceType string, resourc
 	if err != nil {
 		id = uuid.NewString()
 	}
-	_, err = s.db.Exec(
+	_, err = db.Exec(
 		`INSERT INTO audit_events (id, actor_id, action, resource_type, resource_id, outcome, ip, user_agent, metadata, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, actorID, action, resourceType, resourceID, outcome, ip, userAgent, metadata, formatTime(time.Now()),

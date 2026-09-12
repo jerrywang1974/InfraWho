@@ -463,3 +463,211 @@ func TestGetNotFound(t *testing.T) {
 		t.Fatalf("get missing: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestPatchRejectsEmptyAndUnknown(t *testing.T) {
+	_, srv, _ := testServer(t)
+	tok := bootstrap(t, srv)
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets", tok, sampleCreate("patch-empty.example"))
+	var created map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&created)
+	id, _ := created["id"].(string)
+	before := created["updated_at"]
+
+	rec = doJSON(t, srv, http.MethodPatch, "/api/v1/assets/"+id, tok, `{}`)
+	if rec.Code != http.StatusUnprocessableEntity || errorCode(rec.Body) != "validation_error" {
+		t.Fatalf("empty patch: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, srv, http.MethodPatch, "/api/v1/assets/"+id, tok, `{"not_a_field":1}`)
+	if rec.Code != http.StatusUnprocessableEntity || errorCode(rec.Body) != "validation_error" {
+		t.Fatalf("unknown field: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, srv, http.MethodGet, "/api/v1/assets/"+id, tok, "")
+	_ = json.NewDecoder(rec.Body).Decode(&created)
+	if created["updated_at"] != before {
+		t.Fatalf("updated_at changed on rejected patch: %v -> %v", before, created["updated_at"])
+	}
+}
+
+func TestPurgeRequiresSoftDelete(t *testing.T) {
+	_, srv, _ := testServer(t)
+	tok := bootstrap(t, srv)
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets", tok, sampleCreate("purge-active.example"))
+	var created map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&created)
+	id, _ := created["id"].(string)
+
+	stepUp(t, srv, tok)
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/assets/"+id+"/purge", tok, "")
+	if rec.Code != http.StatusConflict || errorCode(rec.Body) != "conflict" {
+		t.Fatalf("purge active: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPurgeWithoutStepUp(t *testing.T) {
+	_, srv, _ := testServer(t)
+	tok := bootstrap(t, srv)
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets", tok, sampleCreate("purge-stepup.example"))
+	var created map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&created)
+	id, _ := created["id"].(string)
+
+	stepUp(t, srv, tok)
+	rec = doJSON(t, srv, http.MethodDelete, "/api/v1/assets/"+id, tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("soft-delete: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// New login without step-up
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/auth/login", "", `{"username":"admin","password":"password1"}`)
+	tok = cookieValue(rec, auth.SessionCookieName)
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/assets/"+id+"/purge", tok, "")
+	if rec.Code != http.StatusForbidden || errorCode(rec.Body) != "step_up_required" {
+		t.Fatalf("purge without step-up: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDestructiveOriginRequired(t *testing.T) {
+	_, srv, _ := testServer(t)
+	tok := bootstrap(t, srv)
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets", tok, sampleCreate("origin-del.example"))
+	var created map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&created)
+	id, _ := created["id"].(string)
+	stepUp(t, srv, tok)
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/assets/"+id, nil)
+	req.Host = "example.test"
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: tok})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || errorCode(rec.Body) != "forbidden" {
+		t.Fatalf("delete without origin: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/assets/"+id+"/purge", nil)
+	req.Host = "example.test"
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: tok})
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || errorCode(rec.Body) != "forbidden" {
+		t.Fatalf("purge without origin: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListDefaultLimit(t *testing.T) {
+	_, srv, _ := testServer(t)
+	tok := bootstrap(t, srv)
+	rec := doJSON(t, srv, http.MethodGet, "/api/v1/assets", tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d", rec.Code)
+	}
+	var list map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&list)
+	if int(list["limit"].(float64)) != 50 {
+		t.Fatalf("default limit: %#v", list["limit"])
+	}
+}
+
+func TestPurgeCascadesChildren(t *testing.T) {
+	sqlDB, err := db.Open("sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	authStore := auth.NewStore(sqlDB)
+	ah := auth.NewHandler(authStore, ratelimit.New(), auth.Options{
+		CookieSecure:   false,
+		MasterKeyReady: func() bool { return true },
+	})
+	store := assets.NewStore(sqlDB)
+	assetH := assets.NewHandler(store, assets.Options{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/auth/login", ah.Login)
+	mux.HandleFunc("/api/v1/auth/step-up", ah.StepUp)
+	mux.HandleFunc("/api/v1/setup/bootstrap", ah.Bootstrap)
+	assetH.Register(mux, ah.RequireOrigin)
+	srv := ah.Middleware(mux)
+
+	tok := bootstrap(t, srv)
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets", tok,
+		`{"name":"Cascade","hostname":"cascade.example","asset_type":"vm","os_family":"linux","environment":"lab","tags":["cascade"]}`)
+	var created map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&created)
+	id, _ := created["id"].(string)
+
+	accID := "01a0932e-0000-7000-8000-000000000001"
+	_, err = sqlDB.Exec(
+		`INSERT INTO accounts (id, asset_id, username, auth_type, description) VALUES (?, ?, 'root', 'password', '')`,
+		accID, id,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO secret_payloads (account_id, nonce, ciphertext, wrapped_dek, key_version)
+		 VALUES (?, X'00', X'00', X'00', 'v1')`,
+		accID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO scheduled_jobs (id, asset_id, name, scheduler_type) VALUES (?, ?, 'nightly', 'cron')`,
+		"01a0932e-0000-7000-8000-000000000002", id,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sqlDB.Exec(
+		`INSERT INTO asset_notes (id, asset_id, title, body) VALUES (?, ?, 'note', 'body')`,
+		"01a0932e-0000-7000-8000-000000000003", id,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stepUp(t, srv, tok)
+	rec = doJSON(t, srv, http.MethodDelete, "/api/v1/assets/"+id, tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("soft-delete: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/assets/"+id+"/purge", tok, "")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("purge: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var n int
+	_ = sqlDB.QueryRow(`SELECT COUNT(*) FROM accounts WHERE asset_id = ?`, id).Scan(&n)
+	if n != 0 {
+		t.Fatalf("accounts remain: %d", n)
+	}
+	_ = sqlDB.QueryRow(`SELECT COUNT(*) FROM secret_payloads WHERE account_id = ?`, accID).Scan(&n)
+	if n != 0 {
+		t.Fatalf("secrets remain: %d", n)
+	}
+	_ = sqlDB.QueryRow(`SELECT COUNT(*) FROM scheduled_jobs WHERE asset_id = ?`, id).Scan(&n)
+	if n != 0 {
+		t.Fatalf("jobs remain: %d", n)
+	}
+	_ = sqlDB.QueryRow(`SELECT COUNT(*) FROM asset_notes WHERE asset_id = ?`, id).Scan(&n)
+	if n != 0 {
+		t.Fatalf("notes remain: %d", n)
+	}
+	_ = sqlDB.QueryRow(`SELECT COUNT(*) FROM asset_tags WHERE asset_id = ?`, id).Scan(&n)
+	if n != 0 {
+		t.Fatalf("asset_tags remain: %d", n)
+	}
+}
+
+func TestInvalidOwner(t *testing.T) {
+	_, srv, _ := testServer(t)
+	tok := bootstrap(t, srv)
+	body := `{"name":"X","hostname":"bad-owner.example","asset_type":"vm","os_family":"linux","environment":"dev","owner_id":"01a0932e-0000-7000-8000-ffffffffffff"}`
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets", tok, body)
+	if rec.Code != http.StatusUnprocessableEntity || errorCode(rec.Body) != "validation_error" {
+		t.Fatalf("bad owner create: %d %s", rec.Code, rec.Body.String())
+	}
+}
