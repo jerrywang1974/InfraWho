@@ -10,6 +10,7 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv(EnvDBURL, "")
 	t.Setenv(EnvMasterKeyFile, "")
+	t.Setenv(EnvKeyVersion, "")
 	t.Setenv(EnvListenAddr, "")
 	t.Setenv(EnvCookieSecure, "")
 	t.Setenv(EnvTrustedOrigins, "")
@@ -25,6 +26,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ListenAddr != DefaultListenAddr {
 		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, DefaultListenAddr)
 	}
+	if cfg.KeyVersion != DefaultKeyVersion {
+		t.Fatalf("KeyVersion = %q, want %q", cfg.KeyVersion, DefaultKeyVersion)
+	}
 	if !cfg.CookieSecure {
 		t.Fatal("CookieSecure default should be true")
 	}
@@ -33,6 +37,18 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if len(cfg.TrustedOrigins) != 0 {
 		t.Fatalf("TrustedOrigins = %v, want empty", cfg.TrustedOrigins)
+	}
+}
+
+func TestLoadKeyVersion(t *testing.T) {
+	t.Setenv(EnvDBURL, DefaultDBURL)
+	t.Setenv(EnvKeyVersion, "kek-v2")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.KeyVersion != "kek-v2" {
+		t.Fatalf("KeyVersion = %q", cfg.KeyVersion)
 	}
 }
 

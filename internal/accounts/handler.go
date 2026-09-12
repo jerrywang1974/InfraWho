@@ -12,10 +12,15 @@ import (
 	"github.com/jerrywang1974/InfraWho/internal/ratelimit"
 )
 
+// Auditor records audit events (narrow seam for fail-closed reveal tests).
+type Auditor interface {
+	Write(in audit.WriteInput) error
+}
+
 // Handler serves account and reveal endpoints.
 type Handler struct {
 	store      *Store
-	audit      *audit.Store
+	audit      Auditor
 	limiter    *ratelimit.Limiter
 	trustProxy bool
 }
@@ -26,14 +31,14 @@ type Options struct {
 	Limiter    *ratelimit.Limiter
 }
 
-func NewHandler(store *Store, auditStore *audit.Store, opts Options) *Handler {
+func NewHandler(store *Store, auditor Auditor, opts Options) *Handler {
 	lim := opts.Limiter
 	if lim == nil {
 		lim = ratelimit.New()
 	}
 	return &Handler{
 		store:      store,
-		audit:      auditStore,
+		audit:      auditor,
 		limiter:    lim,
 		trustProxy: opts.TrustProxy,
 	}
@@ -175,6 +180,7 @@ func (h *Handler) Patch(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrAuthTypeImmutable):
 			writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
 		default:
+			log.Printf("accounts: patch failed id=%s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "Could not update account")
 		}
 		return
@@ -246,17 +252,20 @@ func (h *Handler) Reveal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.limiter.Allow("reveal:session:"+sess.ID, auth.RevealSessionLimit, auth.RevealWindow) {
-		in := h.auditBase(r)
-		in.Action = audit.ActionRevealRateLimited
-		in.ResourceType = "account"
-		in.ResourceID = &id
-		in.Outcome = audit.OutcomeDenied
-		in.Metadata = `{"reason":"session_rate_limit"}`
-		if err := h.audit.Write(in); err != nil {
-			log.Printf("accounts: reveal rate-limit audit failed id=%s: %v", id, err)
-			writeError(w, http.StatusInternalServerError, "internal_error", "Could not record audit event")
-			return
+	allowed, firstDeny := h.limiter.AllowReport("reveal:session:"+sess.ID, auth.RevealSessionLimit, auth.RevealWindow)
+	if !allowed {
+		if firstDeny {
+			in := h.auditBase(r)
+			in.Action = audit.ActionRevealRateLimited
+			in.ResourceType = "account"
+			in.ResourceID = &id
+			in.Outcome = audit.OutcomeDenied
+			in.Metadata = `{"reason":"session_rate_limit"}`
+			if err := h.audit.Write(in); err != nil {
+				log.Printf("accounts: reveal rate-limit audit failed id=%s: %v", id, err)
+				writeError(w, http.StatusInternalServerError, "internal_error", "Could not record audit event")
+				return
+			}
 		}
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Reveal rate limit exceeded")
 		return

@@ -11,17 +11,11 @@ import (
 
 // Handler serves /api/v1/audit-events.
 type Handler struct {
-	store      *Store
-	trustProxy bool
+	store *Store
 }
 
-// Options configures the audit list handler.
-type Options struct {
-	TrustProxy bool
-}
-
-func NewHandler(store *Store, opts Options) *Handler {
-	return &Handler{store: store, trustProxy: opts.TrustProxy}
+func NewHandler(store *Store) *Handler {
+	return &Handler{store: store}
 }
 
 type listResponse struct {

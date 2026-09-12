@@ -10,6 +10,7 @@ import (
 const (
 	EnvDBURL          = "INFRAWHO_DB_URL"
 	EnvMasterKeyFile  = "INFRAWHO_MASTER_KEY_FILE"
+	EnvKeyVersion     = "INFRAWHO_KEY_VERSION"
 	EnvListenAddr     = "INFRAWHO_LISTEN_ADDR"
 	EnvCookieSecure   = "INFRAWHO_COOKIE_SECURE"
 	EnvTrustedOrigins = "INFRAWHO_TRUSTED_ORIGINS"
@@ -17,12 +18,15 @@ const (
 
 	DefaultDBURL      = "sqlite:///data/infrawho.db"
 	DefaultListenAddr = ":8080"
+	DefaultKeyVersion = "kek-v1"
 	MasterKeySize     = 32
 )
 
 type Config struct {
-	DBURL          string
-	MasterKeyFile  string
+	DBURL         string
+	MasterKeyFile string
+	// KeyVersion is stamped on new secret_payloads (must match the loaded KEK identity).
+	KeyVersion     string
 	ListenAddr     string
 	CookieSecure   bool
 	TrustedOrigins []string
@@ -35,6 +39,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		DBURL:          getenv(EnvDBURL, DefaultDBURL),
 		MasterKeyFile:  strings.TrimSpace(os.Getenv(EnvMasterKeyFile)),
+		KeyVersion:     getenv(EnvKeyVersion, DefaultKeyVersion),
 		ListenAddr:     getenv(EnvListenAddr, DefaultListenAddr),
 		CookieSecure:   getenvBool(EnvCookieSecure, true),
 		TrustedOrigins: splitCSV(os.Getenv(EnvTrustedOrigins)),

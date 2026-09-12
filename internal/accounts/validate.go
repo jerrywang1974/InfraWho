@@ -43,6 +43,9 @@ func validateCreate(in *createRequest) error {
 		return fmt.Errorf("description exceeds %d characters", maxDescriptionLen)
 	}
 	if in.Secret != nil {
+		if *in.Secret == "" {
+			return fmt.Errorf("secret is required when provided")
+		}
 		if utf8.RuneCountInString(*in.Secret) > maxSecretLen {
 			return fmt.Errorf("secret exceeds %d characters", maxSecretLen)
 		}

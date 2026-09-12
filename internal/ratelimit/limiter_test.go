@@ -20,6 +20,24 @@ func TestLimiterAllow(t *testing.T) {
 	}
 }
 
+func TestAllowReportFirstDeny(t *testing.T) {
+	l := New()
+	for i := 0; i < 2; i++ {
+		ok, first := l.AllowReport("k", 2, time.Minute)
+		if !ok || first {
+			t.Fatalf("allow #%d: ok=%v first=%v", i+1, ok, first)
+		}
+	}
+	ok, first := l.AllowReport("k", 2, time.Minute)
+	if ok || !first {
+		t.Fatalf("first deny: ok=%v first=%v", ok, first)
+	}
+	ok, first = l.AllowReport("k", 2, time.Minute)
+	if ok || first {
+		t.Fatalf("second deny: ok=%v first=%v", ok, first)
+	}
+}
+
 func TestLockout(t *testing.T) {
 	lo := NewLockout()
 	for i := 0; i < 9; i++ {

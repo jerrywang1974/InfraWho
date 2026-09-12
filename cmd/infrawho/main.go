@@ -108,12 +108,11 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, sqlDB *sql.DB) {
 	assetHandler.Register(api, authHandler.RequireOrigin)
 
 	auditStore := audit.NewStore(sqlDB)
-	auditHandler := audit.NewHandler(auditStore, audit.Options{TrustProxy: cfg.TrustProxy})
-	auditHandler.Register(api)
+	audit.NewHandler(auditStore).Register(api)
 
 	masterKeyFile := cfg.MasterKeyFile
-	accountStore := accounts.NewStore(sqlDB, auditStore, accounts.StoreOptions{
-		KeyVersion: "kek-v1",
+	accountStore := accounts.NewStore(sqlDB, accounts.StoreOptions{
+		KeyVersion: cfg.KeyVersion,
 		LoadKEK: func() ([]byte, error) {
 			return config.LoadMasterKey(masterKeyFile)
 		},

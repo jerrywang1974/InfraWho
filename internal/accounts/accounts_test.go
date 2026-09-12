@@ -3,6 +3,7 @@ package accounts_test
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -51,7 +52,7 @@ func testServer(t *testing.T) (http.Handler, *audit.Store, string) {
 	})
 	auditStore := audit.NewStore(sqlDB)
 	assetH := assets.NewHandler(assets.NewStore(sqlDB), assets.Options{})
-	accountStore := accounts.NewStore(sqlDB, auditStore, accounts.StoreOptions{
+	accountStore := accounts.NewStore(sqlDB, accounts.StoreOptions{
 		KeyVersion: "kek-v1",
 		LoadKEK: func() ([]byte, error) {
 			return config.LoadMasterKey(kekPath)
@@ -69,7 +70,7 @@ func testServer(t *testing.T) (http.Handler, *audit.Store, string) {
 	mux.HandleFunc("/api/v1/setup/acknowledge", ah.Acknowledge)
 	assetH.Register(mux, ah.RequireOrigin)
 	accountH.Register(mux, ah.RequireOrigin)
-	audit.NewHandler(auditStore, audit.Options{}).Register(mux)
+	audit.NewHandler(auditStore).Register(mux)
 	return ah.Middleware(mux), auditStore, kekPath
 }
 
@@ -361,7 +362,7 @@ func TestViewerCannotReveal(t *testing.T) {
 	})
 	auditStore := audit.NewStore(sqlDB)
 	assetH := assets.NewHandler(assets.NewStore(sqlDB), assets.Options{})
-	accountStore := accounts.NewStore(sqlDB, auditStore, accounts.StoreOptions{
+	accountStore := accounts.NewStore(sqlDB, accounts.StoreOptions{
 		KeyVersion: "kek-v1",
 		LoadKEK:    func() ([]byte, error) { return config.LoadMasterKey(kekPath) },
 	})
@@ -416,7 +417,7 @@ func TestRevealRateLimit(t *testing.T) {
 	})
 	auditStore := audit.NewStore(sqlDB)
 	assetH := assets.NewHandler(assets.NewStore(sqlDB), assets.Options{})
-	accountStore := accounts.NewStore(sqlDB, auditStore, accounts.StoreOptions{
+	accountStore := accounts.NewStore(sqlDB, accounts.StoreOptions{
 		KeyVersion: "kek-v1",
 		LoadKEK:    func() ([]byte, error) { return config.LoadMasterKey(kekPath) },
 	})
@@ -439,26 +440,29 @@ func TestRevealRateLimit(t *testing.T) {
 	id, _ := acc["id"].(string)
 	stepUp(t, srv, tok)
 
-	limited := false
+	limited := 0
 	for i := 0; i < auth.RevealSessionLimit+5; i++ {
 		rec = doJSON(t, srv, http.MethodPost, "/api/v1/accounts/"+id+"/reveal", tok, "")
 		if rec.Code == http.StatusTooManyRequests {
 			if errorCode(rec.Body) != "rate_limited" {
 				t.Fatalf("rate code: %s", rec.Body.String())
 			}
-			limited = true
-			break
+			limited++
+			continue
 		}
 		if rec.Code != http.StatusOK {
 			t.Fatalf("reveal %d: %d %s", i, rec.Code, rec.Body.String())
 		}
 	}
-	if !limited {
-		t.Fatal("expected rate limit")
+	if limited < 2 {
+		t.Fatalf("expected multiple rate-limited responses, got %d", limited)
 	}
-	events, _, err := auditStore.List(audit.ListFilter{Action: audit.ActionRevealRateLimited, Limit: 5})
-	if err != nil || len(events) < 1 {
-		t.Fatalf("rate limit audit: %v len=%d", err, len(events))
+	events, _, err := auditStore.List(audit.ListFilter{Action: audit.ActionRevealRateLimited, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want one REVEAL_RATE_LIMITED audit, got %d", len(events))
 	}
 }
 
@@ -469,5 +473,97 @@ func TestCreateOnMissingAsset(t *testing.T) {
 		`{"username":"u","auth_type":"password"}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("missing asset: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateRejectsEmptySecret(t *testing.T) {
+	srv, _, _ := testServer(t)
+	tok := bootstrap(t, srv)
+	assetID := createAsset(t, srv, tok, "empty-secret.example")
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets/"+assetID+"/accounts", tok,
+		`{"username":"u","auth_type":"password","secret":""}`)
+	if rec.Code != http.StatusUnprocessableEntity || errorCode(rec.Body) != "validation_error" {
+		t.Fatalf("empty secret create: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateOnSoftDeletedAsset(t *testing.T) {
+	srv, _, _ := testServer(t)
+	tok := bootstrap(t, srv)
+	assetID := createAsset(t, srv, tok, "soft-acc.example")
+	stepUp(t, srv, tok)
+	rec := doJSON(t, srv, http.MethodDelete, "/api/v1/assets/"+assetID, tok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("soft-delete: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/assets/"+assetID+"/accounts", tok,
+		`{"username":"u","auth_type":"password"}`)
+	if rec.Code != http.StatusConflict || errorCode(rec.Body) != "conflict" {
+		t.Fatalf("create on soft-deleted: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+type failAuditor struct {
+	failOn string
+	inner  accounts.Auditor
+}
+
+func (f *failAuditor) Write(in audit.WriteInput) error {
+	if in.Action == f.failOn {
+		return errors.New("forced audit failure")
+	}
+	if f.inner != nil {
+		return f.inner.Write(in)
+	}
+	return nil
+}
+
+func TestRevealFailsClosedWhenAuditWriteFails(t *testing.T) {
+	sqlDB, err := db.Open("sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	kekPath := writeTempKEK(t)
+	limiter := ratelimit.New()
+	authStore := auth.NewStore(sqlDB)
+	ah := auth.NewHandler(authStore, limiter, auth.Options{
+		CookieSecure:   false,
+		MasterKeyReady: func() bool { return true },
+	})
+	auditStore := audit.NewStore(sqlDB)
+	assetH := assets.NewHandler(assets.NewStore(sqlDB), assets.Options{})
+	accountStore := accounts.NewStore(sqlDB, accounts.StoreOptions{
+		KeyVersion: "kek-v1",
+		LoadKEK:    func() ([]byte, error) { return config.LoadMasterKey(kekPath) },
+	})
+	failing := &failAuditor{failOn: audit.ActionCredentialReveal, inner: auditStore}
+	accountH := accounts.NewHandler(accountStore, failing, accounts.Options{Limiter: limiter})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/auth/login", ah.Login)
+	mux.HandleFunc("/api/v1/auth/step-up", ah.StepUp)
+	mux.HandleFunc("/api/v1/setup/bootstrap", ah.Bootstrap)
+	assetH.Register(mux, ah.RequireOrigin)
+	accountH.Register(mux, ah.RequireOrigin)
+	srv := ah.Middleware(mux)
+
+	tok := bootstrap(t, srv)
+	assetID := createAsset(t, srv, tok, "fail-audit.example")
+	rec := doJSON(t, srv, http.MethodPost, "/api/v1/assets/"+assetID+"/accounts", tok,
+		`{"username":"u","auth_type":"password","secret":"topsecret"}`)
+	var acc map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&acc)
+	id, _ := acc["id"].(string)
+	stepUp(t, srv, tok)
+
+	rec = doJSON(t, srv, http.MethodPost, "/api/v1/accounts/"+id+"/reveal", tok, "")
+	if rec.Code != http.StatusInternalServerError || errorCode(strings.NewReader(rec.Body.String())) != "internal_error" {
+		t.Fatalf("reveal with audit fail: %d %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	_ = json.NewDecoder(strings.NewReader(rec.Body.String())).Decode(&body)
+	if _, ok := body["secret"]; ok {
+		t.Fatalf("secret must not be present on audit failure: %#v", body)
 	}
 }

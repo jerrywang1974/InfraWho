@@ -61,7 +61,7 @@ func TestListRequiresAdmin(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/setup/bootstrap", ah.Bootstrap)
 	mux.HandleFunc("/api/v1/auth/login", ah.Login)
-	audit.NewHandler(auditStore, audit.Options{}).Register(mux)
+	audit.NewHandler(auditStore).Register(mux)
 	srv := ah.Middleware(mux)
 
 	body := `{"username":"admin","password":"password1","acknowledge_kek_offline":true,"acknowledge_kek_irrecoverable":true,"acknowledge_backup_planned":true}`

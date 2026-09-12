@@ -48,7 +48,6 @@ type SecretPayload struct {
 // Store persists accounts and secret_payloads.
 type Store struct {
 	db         *sql.DB
-	audit      *audit.Store
 	keyVersion string
 	loadKEK    func() ([]byte, error)
 }
@@ -59,14 +58,13 @@ type StoreOptions struct {
 	LoadKEK    func() ([]byte, error)
 }
 
-func NewStore(db *sql.DB, auditStore *audit.Store, opts StoreOptions) *Store {
+func NewStore(db *sql.DB, opts StoreOptions) *Store {
 	kv := strings.TrimSpace(opts.KeyVersion)
 	if kv == "" {
 		kv = "kek-v1"
 	}
 	return &Store{
 		db:         db,
-		audit:      auditStore,
 		keyVersion: kv,
 		loadKEK:    opts.LoadKEK,
 	}

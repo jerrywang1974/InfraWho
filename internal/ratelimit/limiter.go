@@ -12,8 +12,9 @@ type Limiter struct {
 }
 
 type window struct {
-	count int
-	start time.Time
+	count  int
+	start  time.Time
+	denied bool // first-deny already signaled this window
 }
 
 func New() *Limiter {
@@ -22,8 +23,14 @@ func New() *Limiter {
 
 // Allow reports whether key may proceed under max events per window.
 func (l *Limiter) Allow(key string, max int, per time.Duration) bool {
+	ok, _ := l.AllowReport(key, max, per)
+	return ok
+}
+
+// AllowReport is like Allow; firstDeny is true only on the first rejection in the current window.
+func (l *Limiter) AllowReport(key string, max int, per time.Duration) (allowed, firstDeny bool) {
 	if max <= 0 || per <= 0 {
-		return true
+		return true, false
 	}
 	now := time.Now()
 	l.mu.Lock()
@@ -32,13 +39,15 @@ func (l *Limiter) Allow(key string, max int, per time.Duration) bool {
 	w, ok := l.windows[key]
 	if !ok || now.Sub(w.start) >= per {
 		l.windows[key] = &window{count: 1, start: now}
-		return true
+		return true, false
 	}
 	if w.count >= max {
-		return false
+		first := !w.denied
+		w.denied = true
+		return false, first
 	}
 	w.count++
-	return true
+	return true, false
 }
 
 // Lockout tracks consecutive failures and temporary locks per key.

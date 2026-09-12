@@ -19,6 +19,7 @@ Auth + assets API: config loading, SQLite open + auto-migrate, session cookies (
 |----------|---------|--------|
 | `INFRAWHO_DB_URL` | `sqlite:///data/infrawho.db` | Phase 1 **SQLite only**. Non-`sqlite:` schemes fail at startup. Parent dirs are created; embedded migrations run on open. |
 | `INFRAWHO_MASTER_KEY_FILE` | _(empty)_ | Path to KEK file (32 raw bytes **or** base64 of 32 bytes). Preferred over env-embedded keys. |
+| `INFRAWHO_KEY_VERSION` | `kek-v1` | Label stamped on new `secret_payloads.key_version` (must identify the loaded KEK). Update after rewrap when switching to a new KEK. |
 | `INFRAWHO_LISTEN_ADDR` | `:8080` | HTTP listen address. |
 | `INFRAWHO_COOKIE_SECURE` | `true` | Set `false` for plain-HTTP lab (Compose does this). Production behind TLS should keep `true`. |
 | `INFRAWHO_TRUSTED_ORIGINS` | _(empty)_ | Optional comma-separated origins (`https://app.example`) or bare hosts. Scheme-bearing entries match that scheme only. |
@@ -61,7 +62,7 @@ infrawho keys rewrap --from kek-v1 --to kek-v2 \
 
 Uses `INFRAWHO_DB_URL`. Re-run if interrupted; keep **both** key files until `remaining_from=0`. Do **not** start the app mid-rotation.
 
-3. Point `INFRAWHO_MASTER_KEY_FILE` **only** at the new key.
+3. Point `INFRAWHO_MASTER_KEY_FILE` **only** at the new key, and set `INFRAWHO_KEY_VERSION` to the `--to` value (e.g. `kek-v2`) so new create/rotate stamps match the loaded KEK.
 4. **Start** the service; confirm `GET /readyz` and sample a reveal on a non-critical account.
 5. Destroy the old KEK only after checklist confirmation (`COUNT` of old `key_version` is 0).
 
