@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/jerrywang1974/InfraWho/internal/assets"
 	"github.com/jerrywang1974/InfraWho/internal/auth"
 	"github.com/jerrywang1974/InfraWho/internal/config"
 	"github.com/jerrywang1974/InfraWho/internal/db"
@@ -100,6 +101,9 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, sqlDB *sql.DB) {
 	api.HandleFunc("/api/v1/setup/status", authHandler.SetupStatus)
 	api.HandleFunc("/api/v1/setup/bootstrap", authHandler.Bootstrap)
 	api.HandleFunc("/api/v1/setup/acknowledge", authHandler.Acknowledge)
+
+	assetHandler := assets.NewHandler(assets.NewStore(sqlDB), assets.Options{TrustProxy: cfg.TrustProxy})
+	assetHandler.Register(api, authHandler.RequireOrigin)
 
 	mux.Handle("/", authHandler.Middleware(api))
 }

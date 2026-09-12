@@ -6,7 +6,7 @@ Self-hosted CMDB and credential vault for small infra teams (Phase 1).
 
 ## Status
 
-Auth + vault: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, credential vault crypto (`internal/vault`), `infrawho keys rewrap` CLI, `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Assets/UI come in later PRs.
+Auth + assets API: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, asset CRUD (soft-delete / purge), `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Vault crypto and UI come in later PRs.
 
 ## Requirements
 
@@ -124,6 +124,19 @@ Session cookie `infrawho_session`: `HttpOnly; SameSite=Strict; Path=/` (and `Sec
 | `POST` | `/api/v1/auth/logout` | Clears session |
 | `GET` | `/api/v1/auth/me` | Current user + `step_up_active` |
 | `POST` | `/api/v1/auth/step-up` | Re-check password; step-up valid 5m |
+
+## Assets
+
+Pagination uses `limit` (default 50, max 200) + `offset` (default 0). Soft-deleted assets are omitted from `GET /api/v1/assets` unless `include_deleted=true`. Operator may create/update active metadata; soft-delete and purge require **admin + step-up**.
+
+| Method | Path | Notes |
+|--------|------|-------|
+| `GET` | `/api/v1/assets` | List; filters: `q`, `tag`, `environment`, `status`, `include_deleted` |
+| `POST` | `/api/v1/assets` | Create (operator+); body may include `tags` |
+| `GET` | `/api/v1/assets/{id}` | Detail + accounts/jobs/notes summaries (no secrets) |
+| `PATCH` | `/api/v1/assets/{id}` | Update metadata; rejects `deleted_at` / `status=retired` (422) |
+| `DELETE` | `/api/v1/assets/{id}` | Soft-delete (`status=retired`, `deleted_at=now`); admin + step-up |
+| `POST` | `/api/v1/assets/{id}/purge` | Hard-delete asset and cascaded rows; admin + step-up |
 
 Example first-run (after KEK is in place):
 
