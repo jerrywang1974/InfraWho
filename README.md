@@ -6,7 +6,7 @@ Self-hosted CMDB and credential vault for small infra teams (Phase 1).
 
 ## Status
 
-Auth + assets API: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, asset CRUD (soft-delete / purge), `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Vault crypto and UI come in later PRs.
+Auth + assets API: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, asset CRUD (soft-delete / purge), `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Web UI Phase 1 shell (login, setup wizard, asset list/detail) lives under [`web/`](web/). Vault accounts/jobs UI panels come in a later PR.
 
 ## Requirements
 
@@ -111,6 +111,23 @@ Compose bind-mounts `./lab-master.key` to `/etc/infrawho/master.key` and stores 
 |------|----------|
 | `GET /healthz` | Liveness — always `200` if the process is up. |
 | `GET /readyz` | Readiness — `200` when the DB pings and `INFRAWHO_MASTER_KEY_FILE` loads; otherwise `503`. |
+
+## Web UI (lab)
+
+React + Vite SPA in [`web/`](web/). UI strings are Traditional Chinese.
+
+```bash
+# API (cookie Secure off + trust Vite origin for CSRF Origin checks)
+export INFRAWHO_COOKIE_SECURE=false
+export INFRAWHO_TRUSTED_ORIGINS='http://localhost:5173'
+# …plus DB URL / master key / listen addr as above…
+go run ./cmd/infrawho
+
+# SPA (proxies /api to :8080)
+cd web && npm install && npm run dev
+```
+
+See [`web/README.md`](web/README.md). Production embedding of `web/dist` from Go is deferred; lab uses the Vite proxy.
 
 ## Auth & first-run setup
 

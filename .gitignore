@@ -25,3 +25,7 @@
 
 # Go
 vendor/
+
+# Web (Vite)
+web/node_modules/
+web/dist/
