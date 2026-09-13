@@ -1,0 +1,25 @@
+# Keep build context small and avoid leaking secrets into the image.
+.git
+.github
+**/*.md
+!README.md
+docs/test-records
+docs/design-infrawho-phase1.md
+
+# Secrets and local data — never send to docker build
+*.key
+.env
+.env.*
+/data/
+*.db
+*.db-*
+
+# Dev artifacts
+web/node_modules
+web/dist
+**/bin/
+**/*.test
+**/*.out
+.idea
+.vscode
+**/__pycache__

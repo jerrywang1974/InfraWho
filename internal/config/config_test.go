@@ -16,6 +16,8 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv(EnvTrustedOrigins, "")
 	t.Setenv(EnvTrustProxy, "")
 	t.Setenv(EnvFeatureExportSecrets, "")
+	t.Setenv(EnvFeatureMetrics, "")
+	t.Setenv(EnvWebRoot, "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -39,8 +41,26 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.FeatureExportSecrets {
 		t.Fatal("FeatureExportSecrets default should be false")
 	}
+	if cfg.FeatureMetrics {
+		t.Fatal("FeatureMetrics default should be false")
+	}
+	if cfg.WebRoot != "" {
+		t.Fatalf("WebRoot default should be empty, got %q", cfg.WebRoot)
+	}
 	if len(cfg.TrustedOrigins) != 0 {
 		t.Fatalf("TrustedOrigins = %v, want empty", cfg.TrustedOrigins)
+	}
+}
+
+func TestLoadWebRoot(t *testing.T) {
+	t.Setenv(EnvDBURL, DefaultDBURL)
+	t.Setenv(EnvWebRoot, " /app/web ")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WebRoot != "/app/web" {
+		t.Fatalf("WebRoot = %q", cfg.WebRoot)
 	}
 }
 

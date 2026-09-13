@@ -1,0 +1,37 @@
+# Production-oriented sketch — matches the Phase 1 design (Ops Minimum).
+# Copy / adapt; do not use lab-master.key bind-mounts from the repo tree.
+#
+# Expectations vs lab/verify:
+# - TLS terminates at the org reverse proxy (this service may listen HTTP on localhost)
+# - KEK file lives on the host outside the repo (mode 0600), not ./lab-master.key
+# - INFRAWHO_WEB_ROOT is unset — SPA is served by the proxy or a separate static host
+# - INFRAWHO_COOKIE_SECURE=true (default) behind HTTPS
+# - Prefer --user matching the key owner for non-root (see Dockerfile comments)
+
+services:
+  infrawho:
+    image: infrawho:phase1
+    build:
+      context: .
+      target: runtime
+    # Bind to loopback when the proxy is on the same host.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      INFRAWHO_DB_URL: "sqlite:///data/infrawho.db"
+      INFRAWHO_MASTER_KEY_FILE: "/etc/infrawho/master.key"
+      INFRAWHO_LISTEN_ADDR: ":8080"
+      INFRAWHO_COOKIE_SECURE: "true"
+      INFRAWHO_TRUST_PROXY: "true"
+      # Example: public origin the browser uses (proxy vhost).
+      # INFRAWHO_TRUSTED_ORIGINS: "https://infrawho.example.com"
+      # Do not set INFRAWHO_WEB_ROOT here (API-only; original design).
+    volumes:
+      - infrawho_data:/data
+      - /etc/infrawho/master.key:/etc/infrawho/master.key:ro
+    # Example non-root: uncomment and match key + data ownership
+    # user: "1000:1000"
+    restart: unless-stopped
+
+volumes:
+  infrawho_data:
