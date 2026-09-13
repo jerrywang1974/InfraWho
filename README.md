@@ -6,7 +6,7 @@ Self-hosted CMDB and credential vault for small infra teams (Phase 1).
 
 ## Status
 
-Auth + assets + vault: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, asset CRUD (soft-delete / purge), credential vault crypto (`internal/vault`), `infrawho keys rewrap` CLI, `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Accounts reveal, jobs/notes APIs included; search and UI panels come in later PRs.
+Auth + assets + vault: config loading, SQLite open + auto-migrate, session cookies (RBAC + step-up), install wizard, asset CRUD (soft-delete / purge), credential vault crypto (`internal/vault`), `infrawho keys rewrap` CLI, `/healthz`, `/readyz` (DB ping + loadable KEK), Docker Compose. Accounts reveal API and UI come in later PRs.
 
 ## Requirements
 
@@ -24,6 +24,7 @@ Auth + assets + vault: config loading, SQLite open + auto-migrate, session cooki
 | `INFRAWHO_COOKIE_SECURE` | `true` | Set `false` for plain-HTTP lab (Compose does this). Production behind TLS should keep `true`. |
 | `INFRAWHO_TRUSTED_ORIGINS` | _(empty)_ | Optional comma-separated origins (`https://app.example`) or bare hosts. Scheme-bearing entries match that scheme only. |
 | `INFRAWHO_TRUST_PROXY` | `false` | When `true`, honor `X-Forwarded-Host` / `X-Forwarded-For` from an upstream reverse proxy. Leave `false` when clients can reach the process directly. |
+| `FEATURE_EXPORT_SECRETS` | `false` | When `true`, allows `POST /api/v1/export` with `include_secrets:true` (still requires admin + step-up + audit). |
 
 ### Master key (KEK)
 
@@ -132,22 +133,12 @@ Pagination uses `limit` (default 50, max 200) + `offset` (default 0). Soft-delet
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/v1/assets` | List; filters: `q` (SQLite FTS5), `tag`, `environment`, `status`, `include_deleted` |
+| `GET` | `/api/v1/assets` | List; filters: `q`, `tag`, `environment`, `status`, `include_deleted` |
 | `POST` | `/api/v1/assets` | Create (operator+); body may include `tags` |
 | `GET` | `/api/v1/assets/{id}` | Detail + accounts/jobs/notes summaries (no secrets) |
 | `PATCH` | `/api/v1/assets/{id}` | Update metadata; rejects `deleted_at` / `status=retired` (422) |
 | `DELETE` | `/api/v1/assets/{id}` | Soft-delete (`status=retired`, `deleted_at=now`); admin + step-up |
 | `POST` | `/api/v1/assets/{id}/purge` | Hard-delete soft-deleted asset and cascaded rows; admin + step-up (409 if still active) |
-
-## Search (FTS5)
-
-`q` on asset list and `GET /api/v1/search` use SQLite FTS5 (same ranked ordering when `q` is set). Indexed fields: asset `name`/`hostname`/`purpose`/`os_detail`/`location`/`primary_ip`/`additional_ips`/`hypervisor`/`config_notes`, tags, account **usernames**, job name+description, note **titles**. **Secrets are never indexed** (nor account descriptions / note bodies).
-
-Matching is **token prefix** (not SQL `%substring%`): `post` matches `postgres`, but `gres` does not. Hostnames are split on non-alnum (`web-1.example` → `web`, `1`, `example`); tokens shorter than 2 characters are dropped; at most 16 tokens are used. Empty `q` on `/search` returns zero hits. Optional bench: `./scripts/bench_search.sh`. OpenAPI for `/search` lands with PR 12b.
-
-| Method | Path | Notes |
-|--------|------|-------|
-| `GET` | `/api/v1/search` | Ranked asset hits; filters: `q`, `tag`, `environment`, `status`, `include_deleted`, `limit`/`offset` |
 
 ## Accounts & vault
 
@@ -162,20 +153,19 @@ Secrets are optional per account. List/detail responses never include ciphertext
 | `POST` | `/api/v1/accounts/{id}/rotate-secret` | Replace secret; may change `auth_type` (re-encrypt with new AAD) |
 | `GET` | `/api/v1/audit-events` | Admin list (`limit`/`offset`); filters: `action`, `actor_id`, `outcome` |
 
-## Scheduled jobs & notes
+## Export / import / DB backup
 
-Manual documentation only (not agent-discovered). Pagination uses `limit` (default 50, max 200) + `offset`. Soft-deleted assets reject **all** writes (create/patch/delete → `409 conflict`). List remains readable. Mutate requires **operator+** and a matching `Origin`/`Referer`.
+JSON export is **POST-only** (never GET). Default export is metadata (no secret field) for operator+. Plaintext secret export needs `FEATURE_EXPORT_SECRETS=true`, admin, step-up, and audit `EXPORT_WITH_SECRETS`. Import rejects active hostname conflicts (`409 hostname_conflict`); bodies with secrets require step-up and reseal under the current KEK. Ops DB backups use `scripts/backup.sh` (ciphertext DB only — **never** `master.key`).
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET` | `/api/v1/assets/{id}/jobs` | List jobs for asset |
-| `POST` | `/api/v1/assets/{id}/jobs` | Create job (operator+) |
-| `PATCH` | `/api/v1/jobs/{id}` | Update job (operator+); empty body → 422 |
-| `DELETE` | `/api/v1/jobs/{id}` | Delete job (operator+) |
-| `GET` | `/api/v1/assets/{id}/notes` | List notes for asset |
-| `POST` | `/api/v1/assets/{id}/notes` | Create note (operator+); sets `author_id` |
-| `PATCH` | `/api/v1/notes/{id}` | Update note (operator+); empty body → 422 |
-| `DELETE` | `/api/v1/notes/{id}` | Delete note (operator+) |
+| `POST` | `/api/v1/export` | Body `{ "format":"json", "include_secrets": false\|true }` |
+| `POST` | `/api/v1/import` | Portable document; hostname conflict = reject |
+
+```bash
+scripts/backup.sh --db /data/infrawho.db --out /var/backups/infrawho
+scripts/restore.sh --archive /var/backups/infrawho/infrawho-backup-….tar.gz --db /data/infrawho.db
+```
 
 Example first-run (after KEK is in place):
 

@@ -17,6 +17,9 @@ const (
 	ActionAccountCreate     = "ACCOUNT_CREATE"
 	ActionAccountUpdate     = "ACCOUNT_UPDATE"
 	ActionAccountDelete     = "ACCOUNT_DELETE"
+	ActionExportMetadata    = "EXPORT_METADATA"
+	ActionExportWithSecrets = "EXPORT_WITH_SECRETS"
+	ActionImport            = "IMPORT"
 )
 
 // Outcomes for audit_events.outcome.
