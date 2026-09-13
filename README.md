@@ -139,18 +139,20 @@ Pagination uses `limit` (default 50, max 200) + `offset` (default 0). Soft-delet
 | `DELETE` | `/api/v1/assets/{id}` | Soft-delete (`status=retired`, `deleted_at=now`); admin + step-up |
 | `POST` | `/api/v1/assets/{id}/purge` | Hard-delete soft-deleted asset and cascaded rows; admin + step-up (409 if still active) |
 
-## Accounts & vault
+## Scheduled jobs & notes
 
-Secrets are optional per account. List/detail responses never include ciphertext. Reveal requires **operator+**, valid **step-up**, and is rate-limited (30/session/min). Responses use `Cache-Control: no-store`. When a secret exists, `auth_type` cannot be changed via `PATCH` (use `rotate-secret`).
+Manual documentation only (not agent-discovered). Pagination uses `limit` (default 50, max 200) + `offset`. Soft-deleted assets reject **all** writes (create/patch/delete → `409 conflict`). List remains readable. Mutate requires **operator+** and a matching `Origin`/`Referer`.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `POST` | `/api/v1/assets/{id}/accounts` | Create account; optional `secret` (encrypted at rest) |
-| `PATCH` | `/api/v1/accounts/{id}` | Metadata only; rejects `auth_type` change when `has_secret` |
-| `DELETE` | `/api/v1/accounts/{id}` | Deletes account and secret payload |
-| `POST` | `/api/v1/accounts/{id}/reveal` | Decrypt; step-up + audit `CREDENTIAL_REVEAL` |
-| `POST` | `/api/v1/accounts/{id}/rotate-secret` | Replace secret; may change `auth_type` (re-encrypt with new AAD) |
-| `GET` | `/api/v1/audit-events` | Admin list (`limit`/`offset`); filters: `action`, `actor_id`, `outcome` |
+| `GET` | `/api/v1/assets/{id}/jobs` | List jobs for asset |
+| `POST` | `/api/v1/assets/{id}/jobs` | Create job (operator+) |
+| `PATCH` | `/api/v1/jobs/{id}` | Update job (operator+); empty body → 422 |
+| `DELETE` | `/api/v1/jobs/{id}` | Delete job (operator+) |
+| `GET` | `/api/v1/assets/{id}/notes` | List notes for asset |
+| `POST` | `/api/v1/assets/{id}/notes` | Create note (operator+); sets `author_id` |
+| `PATCH` | `/api/v1/notes/{id}` | Update note (operator+); empty body → 422 |
+| `DELETE` | `/api/v1/notes/{id}` | Delete note (operator+) |
 
 Example first-run (after KEK is in place):
 
