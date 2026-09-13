@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jerrywang1974/InfraWho/internal/search"
 )
 
 const timeLayout = "2006-01-02T15:04:05.000Z"
@@ -242,7 +243,8 @@ func (s *Store) replaceTagsTx(tx *sql.Tx, assetID string, tags []string) error {
 			return err
 		}
 	}
-	return nil
+	// asset_tags has no per-row FTS triggers; one rebuild after the full set.
+	return search.RebuildAssetFTS(tx, assetID)
 }
 
 func upsertTagTx(tx *sql.Tx, name string) (string, error) {
@@ -659,6 +661,8 @@ func (s *Store) List(f ListFilter) ([]Asset, int, error) {
 
 	where := []string{"1=1"}
 	args := []any{}
+	fromSQL := `assets a`
+	orderSQL := `a.updated_at DESC, a.id DESC`
 
 	if !f.IncludeDeleted {
 		where = append(where, "a.deleted_at IS NULL")
@@ -680,15 +684,21 @@ func (s *Store) List(f ListFilter) ([]Asset, int, error) {
 		args = append(args, f.Tag)
 	}
 	if q := strings.TrimSpace(f.Q); q != "" {
-		like := "%" + escapeLike(q) + "%"
-		where = append(where, `(a.name LIKE ? ESCAPE '\' OR a.hostname LIKE ? ESCAPE '\' OR a.purpose LIKE ? ESCAPE '\')`)
-		args = append(args, like, like, like)
+		ftsQ, ok := search.BuildFTSQuery(q)
+		if !ok {
+			return []Asset{}, 0, nil
+		}
+		// FTS over non-secret fields; secrets never enter assets_fts.
+		fromSQL = `assets_fts INNER JOIN assets a ON a.id = assets_fts.asset_id`
+		where = append(where, `assets_fts MATCH ?`)
+		args = append(args, ftsQ)
+		orderSQL = `assets_fts.rank, a.updated_at DESC, a.id DESC`
 	}
 
 	whereSQL := strings.Join(where, " AND ")
 
 	var total int
-	countSQL := `SELECT COUNT(*) FROM assets a WHERE ` + whereSQL
+	countSQL := `SELECT COUNT(*) FROM ` + fromSQL + ` WHERE ` + whereSQL
 	if err := s.db.QueryRow(countSQL, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -698,9 +708,9 @@ func (s *Store) List(f ListFilter) ([]Asset, int, error) {
 		`SELECT a.id, a.name, a.hostname, a.asset_type, a.os_family, a.os_detail, a.environment, a.purpose,
 			a.primary_ip, a.additional_ips, a.location, a.hypervisor, a.owner_id, a.backup_owner_id, a.status,
 			a.config_notes, a.deleted_at, a.created_at, a.updated_at
-		 FROM assets a
+		 FROM `+fromSQL+`
 		 WHERE `+whereSQL+`
-		 ORDER BY a.updated_at DESC, a.id DESC
+		 ORDER BY `+orderSQL+`
 		 LIMIT ? OFFSET ?`,
 		listArgs...,
 	)
@@ -770,11 +780,6 @@ func (s *Store) loadTagsForAssets(ids []string) (map[string][]string, error) {
 		out[assetID] = append(out[assetID], name)
 	}
 	return out, rows.Err()
-}
-
-func escapeLike(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-	return r.Replace(s)
 }
 
 // WriteAudit inserts an audit_events row.
