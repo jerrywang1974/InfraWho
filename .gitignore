@@ -1,0 +1,27 @@
+# Binaries
+/infrawho
+/bin/
+*.exe
+*.test
+*.out
+
+# Env and secrets — never commit master keys
+.env
+.env.*
+*.key
+
+# Local data
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Go
+vendor/
