@@ -5,8 +5,10 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/jerrywang1974/InfraWho/internal/auth"
 	"github.com/jerrywang1974/InfraWho/internal/config"
 	"github.com/jerrywang1974/InfraWho/internal/db"
+	"github.com/jerrywang1974/InfraWho/internal/ratelimit"
 )
 
 func main() {
@@ -22,13 +24,36 @@ func main() {
 	defer sqlDB.Close()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", handleHealthz)
-	mux.HandleFunc("/readyz", handleReadyz(cfg, sqlDB))
+	registerRoutes(mux, cfg, sqlDB)
 
 	log.Printf("infrawho listening on %s", cfg.ListenAddr)
 	if err := http.ListenAndServe(cfg.ListenAddr, mux); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+}
+
+func registerRoutes(mux *http.ServeMux, cfg *config.Config, sqlDB *sql.DB) {
+	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc("/readyz", handleReadyz(cfg, sqlDB))
+
+	store := auth.NewStore(sqlDB)
+	authHandler := auth.NewHandler(store, ratelimit.New(), auth.Options{
+		CookieSecure:   cfg.CookieSecure,
+		TrustProxy:     cfg.TrustProxy,
+		TrustedOrigins: cfg.TrustedOrigins,
+		MasterKeyFile:  cfg.MasterKeyFile,
+	})
+
+	api := http.NewServeMux()
+	api.HandleFunc("/api/v1/auth/login", authHandler.Login)
+	api.HandleFunc("/api/v1/auth/logout", authHandler.Logout)
+	api.HandleFunc("/api/v1/auth/me", authHandler.Me)
+	api.HandleFunc("/api/v1/auth/step-up", authHandler.StepUp)
+	api.HandleFunc("/api/v1/setup/status", authHandler.SetupStatus)
+	api.HandleFunc("/api/v1/setup/bootstrap", authHandler.Bootstrap)
+	api.HandleFunc("/api/v1/setup/acknowledge", authHandler.Acknowledge)
+
+	mux.Handle("/", authHandler.Middleware(api))
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {

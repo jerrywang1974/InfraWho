@@ -11,6 +11,9 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv(EnvDBURL, "")
 	t.Setenv(EnvMasterKeyFile, "")
 	t.Setenv(EnvListenAddr, "")
+	t.Setenv(EnvCookieSecure, "")
+	t.Setenv(EnvTrustedOrigins, "")
+	t.Setenv(EnvTrustProxy, "")
 
 	cfg, err := Load()
 	if err != nil {
@@ -21,6 +24,31 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.ListenAddr != DefaultListenAddr {
 		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, DefaultListenAddr)
+	}
+	if !cfg.CookieSecure {
+		t.Fatal("CookieSecure default should be true")
+	}
+	if cfg.TrustProxy {
+		t.Fatal("TrustProxy default should be false")
+	}
+	if len(cfg.TrustedOrigins) != 0 {
+		t.Fatalf("TrustedOrigins = %v, want empty", cfg.TrustedOrigins)
+	}
+}
+
+func TestLoadCookieSecureAndOrigins(t *testing.T) {
+	t.Setenv(EnvDBURL, DefaultDBURL)
+	t.Setenv(EnvCookieSecure, "false")
+	t.Setenv(EnvTrustedOrigins, "https://app.example, https://admin.example")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.CookieSecure {
+		t.Fatal("CookieSecure should be false")
+	}
+	if len(cfg.TrustedOrigins) != 2 {
+		t.Fatalf("TrustedOrigins = %v", cfg.TrustedOrigins)
 	}
 }
 

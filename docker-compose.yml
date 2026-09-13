@@ -8,6 +8,8 @@ services:
       INFRAWHO_DB_URL: "sqlite:///data/infrawho.db"
       INFRAWHO_MASTER_KEY_FILE: "/etc/infrawho/master.key"
       INFRAWHO_LISTEN_ADDR: ":8080"
+      # Lab Compose is plain HTTP; browsers would drop Secure cookies otherwise.
+      INFRAWHO_COOKIE_SECURE: "false"
     volumes:
       - infrawho_data:/data
       # Must be a regular file before first up (missing path → Docker creates a directory).

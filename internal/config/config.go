@@ -8,9 +8,12 @@ import (
 )
 
 const (
-	EnvDBURL         = "INFRAWHO_DB_URL"
-	EnvMasterKeyFile = "INFRAWHO_MASTER_KEY_FILE"
-	EnvListenAddr    = "INFRAWHO_LISTEN_ADDR"
+	EnvDBURL          = "INFRAWHO_DB_URL"
+	EnvMasterKeyFile  = "INFRAWHO_MASTER_KEY_FILE"
+	EnvListenAddr     = "INFRAWHO_LISTEN_ADDR"
+	EnvCookieSecure   = "INFRAWHO_COOKIE_SECURE"
+	EnvTrustedOrigins = "INFRAWHO_TRUSTED_ORIGINS"
+	EnvTrustProxy     = "INFRAWHO_TRUST_PROXY"
 
 	DefaultDBURL      = "sqlite:///data/infrawho.db"
 	DefaultListenAddr = ":8080"
@@ -18,22 +21,60 @@ const (
 )
 
 type Config struct {
-	DBURL         string
-	MasterKeyFile string
-	ListenAddr    string
+	DBURL          string
+	MasterKeyFile  string
+	ListenAddr     string
+	CookieSecure   bool
+	TrustedOrigins []string
+	// TrustProxy enables X-Forwarded-Host / X-Forwarded-For from an upstream reverse proxy.
+	TrustProxy bool
 }
 
 // Load reads env. Phase 1: require sqlite: scheme.
 func Load() (*Config, error) {
 	cfg := &Config{
-		DBURL:         getenv(EnvDBURL, DefaultDBURL),
-		MasterKeyFile: strings.TrimSpace(os.Getenv(EnvMasterKeyFile)),
-		ListenAddr:    getenv(EnvListenAddr, DefaultListenAddr),
+		DBURL:          getenv(EnvDBURL, DefaultDBURL),
+		MasterKeyFile:  strings.TrimSpace(os.Getenv(EnvMasterKeyFile)),
+		ListenAddr:     getenv(EnvListenAddr, DefaultListenAddr),
+		CookieSecure:   getenvBool(EnvCookieSecure, true),
+		TrustedOrigins: splitCSV(os.Getenv(EnvTrustedOrigins)),
+		TrustProxy:     getenvBool(EnvTrustProxy, false),
 	}
 	if err := validateDBURL(cfg.DBURL); err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+func getenvBool(key string, fallback bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func splitCSV(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getenv(key, fallback string) string {
