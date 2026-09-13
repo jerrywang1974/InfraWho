@@ -1,7 +1,15 @@
-# Lab-oriented Compose. Never commit master key files (*.key).
+# Lab / day-to-day local Compose (API + SPA in one image).
+# For a stricter smoke harness see docker-compose.verify.yml.
+# Production sketch (original design): docker-compose.prod.example.yml
+#
+# Never commit master key files (*.key).
+
 services:
   infrawho:
-    build: .
+    build:
+      context: .
+      target: runtime
+    image: infrawho:lab
     ports:
       - "8080:8080"
     environment:
@@ -10,11 +18,20 @@ services:
       INFRAWHO_LISTEN_ADDR: ":8080"
       # Lab Compose is plain HTTP; browsers would drop Secure cookies otherwise.
       INFRAWHO_COOKIE_SECURE: "false"
+      # Single-box: Go serves Vite dist from the image. Unset for API-only.
+      INFRAWHO_WEB_ROOT: "/app/web"
     volumes:
       - infrawho_data:/data
       # Must be a regular file before first up (missing path → Docker creates a directory).
-      # openssl rand -out lab-master.key 32 && chmod 600 lab-master.key
+      #   ./scripts/docker-lab-up.sh   # creates key + compose up
+      # or: openssl rand -out lab-master.key 32 && chmod 600 lab-master.key
       - ./lab-master.key:/etc/infrawho/master.key:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
 
 volumes:
   infrawho_data:

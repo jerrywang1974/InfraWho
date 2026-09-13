@@ -1,0 +1,1714 @@
+openapi: 3.0.3
+info:
+  title: InfraWho API
+  version: 1.0.0
+  description: |
+    Phase 1 HTTP surface for InfraWho (self-hosted CMDB + credential vault).
+
+    **Frozen Phase 1 surface.** Paths listed under `paths` match what the Go
+    router registers today. Reserved Phase 2 remote/agent endpoints appear only
+    under the root `x-future` extension and **must not** be registered in code
+    (including 501 stubs).
+
+    **Phase 1.5 must-do (K23):** configurable audit webhook for at least
+    `CREDENTIAL_REVEAL`, `EXPORT_WITH_SECRETS`, `ASSET_PURGE` (recommended:
+    `ASSET_SOFT_DELETE`). Phase 1 writes local `AuditEvent` only.
+
+    **SSO (LDAP/OIDC):** Phase 1.5+ backlog — not urgent; local accounts remain
+    the near-term auth model.
+
+    Auth: session cookie `infrawho_session` (`HttpOnly; SameSite=Strict; Path=/`;
+    `Secure` when `INFRAWHO_COOKIE_SECURE=true`). State-changing requests require
+    matching `Origin` or `Referer`. Sensitive actions need step-up
+    (`POST /api/v1/auth/step-up`, valid 5 minutes).
+
+    Pagination (K12): `limit` (default 50, max 200) + `offset` (default 0) only.
+    Search: `GET /api/v1/assets?q=` uses SQL LIKE on `name`/`hostname`/`purpose`
+    only (no FTS5 in this Phase 1 tree). Tag filter is separate `?tag=`.
+    No dedicated `/search` route.
+  license:
+    name: MIT
+
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local / Compose lab (plain HTTP; set INFRAWHO_COOKIE_SECURE=false)
+
+tags:
+  - name: health
+  - name: setup
+  - name: auth
+  - name: assets
+  - name: accounts
+  - name: jobs
+  - name: notes
+  - name: audit
+  - name: backup
+  - name: metrics
+
+# Phase 2+ reserved paths — documentation only; router must not register these.
+x-future:
+  phase: 2+
+  note: |
+    Remote management / agent concepts are design-only in Phase 1.
+    Do not add these routes (or 501 stubs) to the Go mux.
+  permission_note: |
+    Phase 2 should introduce permission credentials:use_for_remote, separate
+    from human CREDENTIAL_REVEAL.
+  paths:
+    - method: POST
+      path: /api/v1/agents/register
+      summary: Agent registration (reserved)
+    - method: GET
+      path: /api/v1/assets/{id}/connectivity
+      summary: Asset connectivity probe (reserved)
+    - method: POST
+      path: /api/v1/assets/{id}/sessions
+      summary: Start remote session (reserved)
+  concepts:
+    - name: AgentRegistration
+      fields: "asset_id, agent_id, last_seen, capabilities[]"
+    - name: RemoteSession
+      fields: "id, asset_id, protocol, started_by, ..."
+
+x-phase15:
+  must_do:
+    - id: K23
+      name: audit webhook
+      description: |
+        Configurable HTTP(S) webhook posting structured events in parallel with
+        local AuditEvent. At least CREDENTIAL_REVEAL, EXPORT_WITH_SECRETS,
+        ASSET_PURGE; recommend ASSET_SOFT_DELETE. Retry / dead-letter in 1.5 design.
+  backlog:
+    - CLI client
+    - TOTP as step-up second factor
+    - UI i18n framework
+    - Postgres driver
+  backlog_later:
+    - LDAP / OIDC SSO (1.5+; explicit IdP need required)
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness
+      operationId: getHealthz
+      responses:
+        "200":
+          description: Process is up
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "ok\n"
+
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness (DB ping + KEK loadable)
+      operationId: getReadyz
+      responses:
+        "200":
+          description: Ready
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "ok\n"
+        "503":
+          description: DB unreachable or master key unavailable
+
+  /metrics:
+    get:
+      tags: [metrics]
+      summary: Prometheus text counters (optional)
+      description: |
+        Registered only when `INFRAWHO_FEATURE_METRICS=true`. No app auth —
+        scrape from trusted network. Not Ops Minimum.
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Prometheus exposition
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          description: Feature disabled (route not registered)
+
+  /api/v1/setup/status:
+    get:
+      tags: [setup]
+      summary: Bootstrap / checklist status
+      operationId: getSetupStatus
+      security: []
+      responses:
+        "200":
+          description: Setup flags
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetupStatus"
+
+  /api/v1/setup/bootstrap:
+    post:
+      tags: [setup]
+      summary: Create first admin + KEK checklist ack
+      description: Requires loadable KEK. Origin check. Rate-limited per IP.
+      operationId: postSetupBootstrap
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapRequest"
+      responses:
+        "200":
+          description: Admin created; session cookie set
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /api/v1/setup/acknowledge:
+    post:
+      tags: [setup]
+      summary: Persist KEK / backup checklist (admin)
+      operationId: postSetupAcknowledge
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcknowledgeRequest"
+      responses:
+        "204":
+          description: Checklist saved
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Create session
+      description: |
+        Rate limits — 10/min per IP, 5/min per username. After 10 consecutive
+        failures the username locks for 15m (`lockout`).
+      operationId: postAuthLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Logged in
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: infrawho_session=...; Path=/; HttpOnly; SameSite=Strict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Destroy session
+      operationId: postAuthLogout
+      security:
+        - sessionCookie: []
+      responses:
+        "204":
+          description: Logged out
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Current user
+      operationId: getAuthMe
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Current session user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/step-up:
+    post:
+      tags: [auth]
+      summary: Re-verify password (step-up, 5 minutes)
+      description: Rate-limited 10/min per session. Required before reveal, soft-delete, purge, secret export/import.
+      operationId: postAuthStepUp
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StepUpRequest"
+      responses:
+        "204":
+          description: Step-up active
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /api/v1/assets:
+    get:
+      tags: [assets]
+      summary: List assets (supports q search + filters)
+      description: |
+        Soft-deleted rows omitted unless `include_deleted=true`.
+        `q` is SQL LIKE over `name`, `hostname`, and `purpose` only (no FTS5).
+        Use `tag=` for exact tag filter (not covered by `q`).
+      operationId: listAssets
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: LIKE match on name, hostname, purpose only (no FTS5)
+        - name: tag
+          in: query
+          schema:
+            type: string
+          description: Exact tag name filter (separate from q)
+        - name: environment
+          in: query
+          schema:
+            $ref: "#/components/schemas/Environment"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, retired, unknown]
+        - name: include_deleted
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Asset page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [assets]
+      summary: Create asset
+      operationId: createAsset
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAsset"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/assets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      tags: [assets]
+      summary: Asset detail with nested summaries (no secrets)
+      operationId: getAsset
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [assets]
+      summary: Update asset metadata
+      description: |
+        Rejects body fields `deleted_at` or `status=retired` with 422
+        (`validation_error`). Soft-delete only via DELETE.
+        409 when the asset is already soft-deleted or hostname conflicts.
+      operationId: patchAsset
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchAsset"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    delete:
+      tags: [assets]
+      summary: Soft-delete asset (admin + step-up)
+      description: Sets `status=retired` and `deleted_at=now`. Audit `ASSET_SOFT_DELETE`.
+      operationId: softDeleteAsset
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Soft-deleted asset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "403":
+          description: Forbidden or step_up_required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/assets/{id}/purge:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    post:
+      tags: [assets]
+      summary: Hard-delete soft-deleted asset (admin + step-up)
+      description: |
+        Cascades accounts/secrets/jobs/notes. Asset must already be soft-deleted
+        (else 409). Audit `ASSET_PURGE`. Single admin + step-up (K24).
+      operationId: purgeAsset
+      security:
+        - sessionCookie: []
+      responses:
+        "204":
+          description: Purged
+        "403":
+          description: Forbidden or step_up_required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/assets/{id}/accounts:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    post:
+      tags: [accounts]
+      summary: Create account (optional secret)
+      description: When `secret` is set, requires a loadable KEK (else 503 `not_ready`).
+      operationId: createAccount
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccount"
+      responses:
+        "201":
+          description: Created (never returns ciphertext)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /api/v1/accounts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    patch:
+      tags: [accounts]
+      summary: Patch account metadata
+      description: |
+        When `has_secret` is true, changing `auth_type` alone is rejected (422).
+        Use `rotate-secret` to change type with new AAD (K22).
+      operationId: patchAccount
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchAccount"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    delete:
+      tags: [accounts]
+      summary: Delete account and secret payload
+      operationId: deleteAccount
+      security:
+        - sessionCookie: []
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/accounts/{id}/reveal:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    post:
+      tags: [accounts]
+      summary: Decrypt secret (operator+ + step-up)
+      description: |
+        Rate-limited 30/session/min. Audit `CREDENTIAL_REVEAL`.
+        Response `Cache-Control: no-store`. 503 if KEK unavailable.
+      operationId: revealAccount
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Plaintext secret (request-scoped)
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevealResponse"
+        "403":
+          description: Forbidden or step_up_required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /api/v1/accounts/{id}/rotate-secret:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    post:
+      tags: [accounts]
+      summary: Replace secret (optional new auth_type)
+      description: |
+        Operator+. Step-up is **not** required. Re-encrypts under new AAD when
+        auth_type changes. Audit `CREDENTIAL_ROTATE`. 503 if KEK unavailable.
+      operationId: rotateSecret
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotateSecret"
+      responses:
+        "200":
+          description: Updated account metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /api/v1/assets/{id}/jobs:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      tags: [jobs]
+      summary: List scheduled jobs for asset
+      operationId: listJobs
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Job page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobList"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [jobs]
+      summary: Create documented scheduled job
+      operationId: createJob
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateJob"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "409":
+          description: Asset soft-deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/jobs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    patch:
+      tags: [jobs]
+      summary: Update job
+      operationId: patchJob
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchJob"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    delete:
+      tags: [jobs]
+      summary: Delete job
+      operationId: deleteJob
+      security:
+        - sessionCookie: []
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/assets/{id}/notes:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    get:
+      tags: [notes]
+      summary: List notes for asset
+      operationId: listNotes
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Note page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoteList"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [notes]
+      summary: Create note
+      operationId: createNote
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNote"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Note"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/notes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceId"
+    patch:
+      tags: [notes]
+      summary: Update note
+      operationId: patchNote
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchNote"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Note"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    delete:
+      tags: [notes]
+      summary: Delete note
+      operationId: deleteNote
+      security:
+        - sessionCookie: []
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/audit-events:
+    get:
+      tags: [audit]
+      summary: List audit events (admin)
+      description: |
+        Local AuditEvent only in Phase 1. Phase 1.5 must-do webhook (K23) is
+        not implemented here.
+      operationId: listAuditEvents
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: actor_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: outcome
+          in: query
+          schema:
+            type: string
+            enum: [success, failure, denied]
+      responses:
+        "200":
+          description: Audit page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditList"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/export:
+    post:
+      tags: [backup]
+      summary: Export portable JSON (POST only)
+      description: |
+        Default `include_secrets:false` — operator+.
+        `include_secrets:true` requires `FEATURE_EXPORT_SECRETS=true` (default
+        false), admin, step-up, and audit `EXPORT_WITH_SECRETS`.
+        Distinct from `scripts/backup.sh` (ciphertext DB only).
+      operationId: exportDocument
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExportRequest"
+      responses:
+        "200":
+          description: Portable document
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportDocument"
+        "403":
+          description: feature_disabled, forbidden, or step_up_required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /api/v1/import:
+    post:
+      tags: [backup]
+      summary: Import portable JSON (hostname conflict = reject)
+      description: |
+        Admin. Bodies containing secrets require step-up; secrets are resealed
+        under the current KEK. Active hostname conflicts → 409 `hostname_conflict`.
+        Max body 32 MiB.
+      operationId: importDocument
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExportDocument"
+      responses:
+        "201":
+          description: Import counts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResult"
+        "403":
+          description: Forbidden or step_up_required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Hostname conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: Body too large
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: infrawho_session
+      description: Server-side session; idle 30m / absolute 12h
+
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  responses:
+    BadRequest:
+      description: Invalid JSON / validation (auth+setup often use 400)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Not authenticated
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Insufficient role / Origin / feature
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ValidationError:
+      description: Validation error (typically 422 on resource PATCH/POST)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Rate limited or lockout
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotReady:
+      description: Master key (KEK) unavailable — error code `not_ready`
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: |
+                Common codes — unauthorized, forbidden, step_up_required,
+                not_found, conflict, validation_error, rate_limited, lockout,
+                feature_disabled, hostname_conflict, not_ready, payload_too_large,
+                internal_error, method_not_allowed.
+            message:
+              type: string
+
+    Environment:
+      type: string
+      enum: [prod, staging, dev, lab, other]
+
+    AssetType:
+      type: string
+      enum: [physical, vm, other]
+
+    OSFamily:
+      type: string
+      enum: [linux, windows, other]
+
+    AuthType:
+      type: string
+      enum: [password, ssh_private_key, api_token, other]
+
+    SchedulerType:
+      type: string
+      enum: [cron, systemd_timer, windows_task, other]
+
+    Role:
+      type: string
+      enum: [viewer, operator, admin]
+
+    SetupStatus:
+      type: object
+      properties:
+        needs_bootstrap:
+          type: boolean
+        master_key_ready:
+          type: boolean
+        checklist_complete:
+          type: boolean
+        show_banner:
+          type: boolean
+
+    BootstrapRequest:
+      type: object
+      required:
+        - username
+        - password
+        - acknowledge_kek_offline
+        - acknowledge_kek_irrecoverable
+        - acknowledge_backup_planned
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          minLength: 8
+        display_name:
+          type: string
+        acknowledge_kek_offline:
+          type: boolean
+        acknowledge_kek_irrecoverable:
+          type: boolean
+        acknowledge_backup_planned:
+          type: boolean
+
+    AcknowledgeRequest:
+      type: object
+      required:
+        - acknowledge_kek_offline
+        - acknowledge_kek_irrecoverable
+        - acknowledge_backup_planned
+      properties:
+        acknowledge_kek_offline:
+          type: boolean
+        acknowledge_kek_irrecoverable:
+          type: boolean
+        acknowledge_backup_planned:
+          type: boolean
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+
+    StepUpRequest:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+
+    Me:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        display_name:
+          type: string
+        role:
+          $ref: "#/components/schemas/Role"
+        step_up_active:
+          type: boolean
+
+    Asset:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        hostname:
+          type: string
+        asset_type:
+          $ref: "#/components/schemas/AssetType"
+        os_family:
+          $ref: "#/components/schemas/OSFamily"
+        os_detail:
+          type: string
+        environment:
+          $ref: "#/components/schemas/Environment"
+        purpose:
+          type: string
+        primary_ip:
+          type: string
+        additional_ips:
+          type: array
+          items:
+            type: string
+        location:
+          type: string
+        hypervisor:
+          type: string
+        owner_id:
+          type: string
+          nullable: true
+          format: uuid
+        backup_owner_id:
+          type: string
+          nullable: true
+          format: uuid
+        status:
+          type: string
+          enum: [active, retired, unknown]
+        config_notes:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        deleted_at:
+          type: string
+          format: date-time
+          description: Present only when soft-deleted; omitted (not null) when active (`omitempty`)
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AccountSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        auth_type:
+          $ref: "#/components/schemas/AuthType"
+        description:
+          type: string
+        last_rotated_at:
+          type: string
+          format: date-time
+          description: Omitted when never rotated (`omitempty`); not emitted as JSON null
+        has_secret:
+          type: boolean
+
+    JobSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scheduler_type:
+          $ref: "#/components/schemas/SchedulerType"
+        enabled_doc:
+          type: boolean
+
+    NoteSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    AssetDetail:
+      allOf:
+        - $ref: "#/components/schemas/Asset"
+        - type: object
+          properties:
+            accounts:
+              type: array
+              items:
+                $ref: "#/components/schemas/AccountSummary"
+            jobs:
+              type: array
+              items:
+                $ref: "#/components/schemas/JobSummary"
+            notes:
+              type: array
+              items:
+                $ref: "#/components/schemas/NoteSummary"
+
+    AssetList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Asset"
+        limit:
+          type: integer
+        offset:
+          type: integer
+        total:
+          type: integer
+
+    CreateAsset:
+      type: object
+      required: [name, hostname, asset_type, os_family, environment, purpose]
+      properties:
+        name:
+          type: string
+        hostname:
+          type: string
+        asset_type:
+          $ref: "#/components/schemas/AssetType"
+        os_family:
+          $ref: "#/components/schemas/OSFamily"
+        os_detail:
+          type: string
+        environment:
+          $ref: "#/components/schemas/Environment"
+        purpose:
+          type: string
+        primary_ip:
+          type: string
+        additional_ips:
+          type: array
+          items:
+            type: string
+        location:
+          type: string
+        hypervisor:
+          type: string
+        owner_id:
+          type: string
+          nullable: true
+          format: uuid
+        backup_owner_id:
+          type: string
+          nullable: true
+          format: uuid
+        status:
+          type: string
+          enum: [active, unknown]
+        config_notes:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+
+    PatchAsset:
+      type: object
+      description: Partial update. Must not send deleted_at or status=retired.
+      properties:
+        name:
+          type: string
+        hostname:
+          type: string
+        asset_type:
+          $ref: "#/components/schemas/AssetType"
+        os_family:
+          $ref: "#/components/schemas/OSFamily"
+        os_detail:
+          type: string
+        environment:
+          $ref: "#/components/schemas/Environment"
+        purpose:
+          type: string
+        primary_ip:
+          type: string
+        additional_ips:
+          type: array
+          items:
+            type: string
+        location:
+          type: string
+        hypervisor:
+          type: string
+        owner_id:
+          type: string
+          nullable: true
+          format: uuid
+        backup_owner_id:
+          type: string
+          nullable: true
+          format: uuid
+        status:
+          type: string
+          enum: [active, unknown]
+        config_notes:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+
+    Account:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset_id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        auth_type:
+          $ref: "#/components/schemas/AuthType"
+        description:
+          type: string
+        last_rotated_at:
+          type: string
+          format: date-time
+          description: Omitted when never rotated (`omitempty`); not emitted as JSON null
+        has_secret:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateAccount:
+      type: object
+      required: [username, auth_type]
+      properties:
+        username:
+          type: string
+        auth_type:
+          $ref: "#/components/schemas/AuthType"
+        description:
+          type: string
+        secret:
+          type: string
+          description: Optional plaintext; encrypted at rest with AAD account_id||auth_type
+
+    PatchAccount:
+      type: object
+      properties:
+        username:
+          type: string
+        auth_type:
+          $ref: "#/components/schemas/AuthType"
+        description:
+          type: string
+
+    RotateSecret:
+      type: object
+      required: [secret]
+      properties:
+        secret:
+          type: string
+        auth_type:
+          $ref: "#/components/schemas/AuthType"
+
+    RevealResponse:
+      type: object
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        auth_type:
+          $ref: "#/components/schemas/AuthType"
+        secret:
+          type: string
+        revealed_at:
+          type: string
+          format: date-time
+
+    Job:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scheduler_type:
+          $ref: "#/components/schemas/SchedulerType"
+        schedule_expr:
+          type: string
+        command_or_path:
+          type: string
+        description:
+          type: string
+        enabled_doc:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateJob:
+      type: object
+      required: [name, scheduler_type]
+      properties:
+        name:
+          type: string
+        scheduler_type:
+          $ref: "#/components/schemas/SchedulerType"
+        schedule_expr:
+          type: string
+        command_or_path:
+          type: string
+        description:
+          type: string
+        enabled_doc:
+          type: boolean
+
+    PatchJob:
+      type: object
+      properties:
+        name:
+          type: string
+        scheduler_type:
+          $ref: "#/components/schemas/SchedulerType"
+        schedule_expr:
+          type: string
+        command_or_path:
+          type: string
+        description:
+          type: string
+        enabled_doc:
+          type: boolean
+
+    JobList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        limit:
+          type: integer
+        offset:
+          type: integer
+        total:
+          type: integer
+
+    Note:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        body:
+          type: string
+        author_id:
+          type: string
+          nullable: true
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateNote:
+      type: object
+      properties:
+        title:
+          type: string
+        body:
+          type: string
+
+    PatchNote:
+      type: object
+      properties:
+        title:
+          type: string
+        body:
+          type: string
+
+    NoteList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Note"
+        limit:
+          type: integer
+        offset:
+          type: integer
+        total:
+          type: integer
+
+    AuditEvent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        actor_id:
+          type: string
+          nullable: true
+          format: uuid
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+          nullable: true
+          format: uuid
+        outcome:
+          type: string
+          enum: [success, failure, denied]
+        ip:
+          type: string
+        user_agent:
+          type: string
+        metadata:
+          type: string
+          description: JSON string (non-secret)
+        created_at:
+          type: string
+          format: date-time
+
+    AuditList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEvent"
+        limit:
+          type: integer
+        offset:
+          type: integer
+        total:
+          type: integer
+
+    ExportRequest:
+      type: object
+      properties:
+        format:
+          type: string
+          enum: [json]
+          default: json
+        include_secrets:
+          type: boolean
+          default: false
+
+    ExportAccount:
+      type: object
+      properties:
+        username:
+          type: string
+        auth_type:
+          $ref: "#/components/schemas/AuthType"
+        description:
+          type: string
+        has_secret:
+          type: boolean
+        secret:
+          type: string
+          description: Present only when include_secrets=true
+
+    ExportJob:
+      type: object
+      properties:
+        name:
+          type: string
+        scheduler_type:
+          $ref: "#/components/schemas/SchedulerType"
+        schedule_expr:
+          type: string
+        command_or_path:
+          type: string
+        description:
+          type: string
+        enabled_doc:
+          type: boolean
+
+    ExportNote:
+      type: object
+      properties:
+        title:
+          type: string
+        body:
+          type: string
+
+    ExportAsset:
+      type: object
+      properties:
+        name:
+          type: string
+        hostname:
+          type: string
+        asset_type:
+          $ref: "#/components/schemas/AssetType"
+        os_family:
+          $ref: "#/components/schemas/OSFamily"
+        os_detail:
+          type: string
+        environment:
+          $ref: "#/components/schemas/Environment"
+        purpose:
+          type: string
+        primary_ip:
+          type: string
+        additional_ips:
+          type: array
+          items:
+            type: string
+        location:
+          type: string
+        hypervisor:
+          type: string
+        status:
+          type: string
+        config_notes:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        accounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExportAccount"
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExportJob"
+        notes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExportNote"
+
+    ExportDocument:
+      type: object
+      properties:
+        version:
+          type: integer
+          example: 1
+        exported_at:
+          type: string
+          format: date-time
+        include_secrets:
+          type: boolean
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExportAsset"
+
+    ImportResult:
+      type: object
+      properties:
+        imported_assets:
+          type: integer
+        imported_accounts:
+          type: integer
+        imported_jobs:
+          type: integer
+        imported_notes:
+          type: integer
